@@ -1,0 +1,10 @@
+.git
+.DS_Store
+__pycache__
+*.py[cod]
+openmmforcefields
+*.ipynb
+output
+results
+archive
+scripts

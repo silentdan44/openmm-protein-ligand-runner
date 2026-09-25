@@ -1,0 +1,22 @@
+name: openmm-protein-ligand-runner
+
+services:
+  openmm-protein-ligand-runner:
+    build: .
+    image: openmm-protein-ligand-runner:local
+    command:
+      - --receptor
+      - /data/AQP3.pdb
+      - --ligand
+      - /data/rank1.sdf
+      - --output
+      - /results
+      - --nvt-steps
+      - ${NVT_STEPS:-250000}
+      - --npt-steps
+      - ${NPT_STEPS:-500000}
+      - --prod-steps
+      - ${PROD_STEPS:-250000000}
+    volumes:
+      - ./input:/data:ro
+      - ${RESULTS_DIR:-../openmm-protein-ligand-runner-results}:/results

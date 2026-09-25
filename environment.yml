@@ -1,0 +1,10 @@
+name: openmm-protein-ligand-runner
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - openmm=8.2
+  - pdbfixer=1.11
+  - openff-toolkit=0.16.5
+  - openff-interchange=0.4.1
+  - openmmforcefields=0.15
