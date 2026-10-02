@@ -149,6 +149,9 @@ def membrane_geometry_summary(topology, positions, lipid_type, membrane_center_z
     import numpy as np
 
     coords = np.asarray(positions.value_in_unit(u.nanometers), dtype=float)
+    # OpenMM's bundled lipid patches are PDB files, whose residue-name field is
+    # only three characters (POPC/POPE become POP, DLPC/DLPE become DLP, etc.).
+    lipid_residue_names = {lipid_type, lipid_type[:3]}
     groups = {"protein": [], "ligand": [], "lipid": [], "water": []}
     protein_coords = []
     ligand_coords = []
@@ -163,7 +166,7 @@ def membrane_geometry_summary(topology, positions, lipid_type, membrane_center_z
         elif residue_name == "LIG":
             groups["ligand"].append(xyz)
             ligand_coords.append(xyz)
-        elif residue_name == lipid_type:
+        elif residue_name in lipid_residue_names:
             groups["lipid"].append(xyz)
         elif residue_name in {"HOH", "WAT", "SOL"}:
             groups["water"].append(xyz)
@@ -204,13 +207,27 @@ def get_tmdet_transform(topology, positions, receptor_path, output_dir):
     if completed.returncode != 0 or not oriented_path.is_file():
         raise RuntimeError(f"TmDet failed (exit {completed.returncode}); see {output_dir / 'tmdet.log'}")
     oriented = app.PDBxFile(str(oriented_path))
-    source_atoms = {atom_signature(a): a.index for a in topology.atoms() if a.element is not None and a.element.symbol != "H"}
-    target_atoms = {atom_signature(a): a.index for a in oriented.topology.atoms() if a.element is not None and a.element.symbol != "H"}
-    keys = sorted(source_atoms.keys() & target_atoms.keys())
-    if len(keys) < 100:
-        raise RuntimeError(f"TmDet output matches only {len(keys)} receptor heavy atoms; cannot safely transfer orientation")
-    source = np.asarray([positions[source_atoms[k]].value_in_unit(u.nanometers) for k in keys])
-    target = np.asarray([oriented.positions[target_atoms[k]].value_in_unit(u.nanometers) for k in keys])
+    # Keep duplicate signatures: PDB inputs can repeat an auth chain ID after
+    # TER records, while TmDet may emit those subunits as separate CIF chains.
+    source_atoms = {}
+    for atom in topology.atoms():
+        if atom.element is not None and atom.element.symbol != "H":
+            source_atoms.setdefault(atom_signature(atom), []).append(atom.index)
+    target_atoms = {}
+    for atom in oriented.topology.atoms():
+        if atom.element is not None and atom.element.symbol != "H":
+            target_atoms.setdefault(atom_signature(atom), []).append(atom.index)
+    source_indices, target_indices = [], []
+    for key in sorted(source_atoms.keys() & target_atoms.keys()):
+        count = min(len(source_atoms[key]), len(target_atoms[key]))
+        source_indices.extend(source_atoms[key][:count])
+        target_indices.extend(target_atoms[key][:count])
+    if len(source_indices) < 100:
+        raise RuntimeError(
+            f"TmDet output matches only {len(source_indices)} receptor heavy atoms; cannot safely transfer orientation"
+        )
+    source = np.asarray([positions[i].value_in_unit(u.nanometers) for i in source_indices])
+    target = np.asarray([oriented.positions[i].value_in_unit(u.nanometers) for i in target_indices])
     source_center = source.mean(axis=0)
     target_center = target.mean(axis=0)
     covariance = (source - source_center).T @ (target - target_center)
@@ -222,7 +239,7 @@ def get_tmdet_transform(topology, positions, receptor_path, output_dir):
     rmsd = float(np.sqrt(np.mean(np.sum((fitted - target) ** 2, axis=1))))
     if rmsd > 0.02:
         raise RuntimeError(f"TmDet transform is not rigid (matched-atom RMSD {rmsd:.4f} nm)")
-    logger.info("Recovered TmDet rigid transform from %d heavy atoms (RMSD %.4f nm)", len(keys), rmsd)
+    logger.info("Recovered TmDet rigid transform from %d heavy atoms (RMSD %.4f nm)", len(source_indices), rmsd)
     return rotation, source_center, target_center
 
 
@@ -281,17 +298,31 @@ def make_barostat(args):
 
 
 def get_platform(requested):
-    if requested != "auto":
-        platform = mm.Platform.getPlatformByName(requested)
-        properties = {"CudaPrecision": "mixed"} if requested == "CUDA" else {}
-        return platform, properties
-
-    for name, properties in (("CUDA", {"CudaPrecision": "mixed"}), ("OpenCL", {}), ("CPU", {}), ("Reference", {})):
+    candidates = (requested,) if requested != "auto" else ("CUDA", "OpenCL", "CPU")
+    failures = []
+    for name in candidates:
+        properties = {"CudaPrecision": "mixed"} if name == "CUDA" else {}
         try:
-            return mm.Platform.getPlatformByName(name), properties
-        except mm.OpenMMException:
-            continue
-    raise RuntimeError("No OpenMM platform is available")
+            platform = mm.Platform.getPlatformByName(name)
+            # A registered plugin does not guarantee that its device/context
+            # can actually be initialized. Probe it before committing a run.
+            probe_system = mm.System()
+            probe_system.addParticle(1.0 * u.dalton)
+            probe_integrator = mm.VerletIntegrator(0.001 * u.picoseconds)
+            probe_context = mm.Context(probe_system, probe_integrator, platform, properties)
+            probe_context.setPositions([[0.0, 0.0, 0.0]] * u.nanometer)
+            del probe_context
+            del probe_integrator
+            logger.info("OpenMM platform %s is available", name)
+            return platform, properties
+        except Exception as exc:
+            failures.append(f"{name}: {exc}")
+            if requested != "auto":
+                break
+            logger.warning("OpenMM platform %s could not initialize; trying next platform: %s", name, exc)
+    if requested == "auto":
+        raise RuntimeError("No usable OpenMM platform found (tried CUDA -> OpenCL -> CPU): " + "; ".join(failures))
+    raise RuntimeError(f"Requested OpenMM platform {requested} could not initialize: " + "; ".join(failures))
 
 
 def sha256_file(path):
@@ -420,6 +451,13 @@ def main():
         package_version("openff-interchange"),
         package_version("openmmforcefields"),
     )
+    current_platform = args.platform
+    if resume:
+        current_platform = previous_progress["platform"]
+        if args.platform != "auto" and args.platform != current_platform:
+            raise ValueError("Requested platform differs from the checkpoint platform")
+    platform, platform_properties = get_platform(current_platform)
+    logger.info("Using OpenMM platform %s", platform.getName())
 
     try:
         logger.info("Loading ligand from %s", ligand_path)
@@ -476,6 +514,7 @@ def main():
                     membraneCenterZ=args.membrane_center_z_nm * u.nanometer,
                     minimumPadding=args.membrane_padding_nm * u.nanometer,
                     ionicStrength=args.ionic_strength_molar * u.molar,
+                    platform=platform,
                 )
             else:
                 modeller.addSolvent(
@@ -488,7 +527,8 @@ def main():
 
         if args.membrane:
             residues = list(modeller.topology.residues())
-            lipid_residues = [residue for residue in residues if residue.name == args.lipid_type]
+            lipid_residue_names = {args.lipid_type, args.lipid_type[:3]}
+            lipid_residues = [residue for residue in residues if residue.name in lipid_residue_names]
             water_residues = [residue for residue in residues if residue.name in {"HOH", "WAT", "SOL"}]
             if len(lipid_residues) < 10 or not water_residues:
                 raise ValueError(
@@ -566,12 +606,8 @@ def main():
             checkpoint_path = output_dir / f"checkpoint-{phase}.chk"
         else:
             checkpoint_path = output_dir / previous_progress["checkpoint"]
-        current_platform = args.platform
         if resume:
             phase = previous_progress["phase"]
-            current_platform = previous_progress["platform"]
-            if args.platform != "auto" and args.platform != current_platform:
-                raise ValueError("Requested platform differs from the checkpoint platform")
         if phase in ("npt", "prod"):
             system.addForce(make_barostat(args))
             if phase == "prod":
@@ -579,8 +615,6 @@ def main():
                     if isinstance(system.getForce(force_index), mm.CustomExternalForce):
                         system.removeForce(force_index)
 
-        platform, platform_properties = get_platform(current_platform)
-        logger.info("Using OpenMM platform %s", platform.getName())
         integrator = mm.LangevinMiddleIntegrator(
             args.temperature_k * u.kelvin,
             args.friction_per_ps / u.picosecond,

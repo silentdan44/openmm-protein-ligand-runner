@@ -35,7 +35,8 @@ docker run --rm \
   --output /results \
   --membrane --orientation tmdet --lipid-type POPC \
   --membrane-padding-nm 1.0 --ionic-strength-molar 0.15 \
-  --nvt-steps 10 --npt-steps 10 --prod-steps 10 --minimize-iterations 10
+  --nvt-steps 10 --npt-steps 10 --prod-steps 10 --minimize-iterations 10 \
+  --report-interval 1 --xtc-interval 1 --checkpoint-interval 10
 ```
 
 Orientation choices:
@@ -50,6 +51,17 @@ The included TRPV4 ligand coordinates are already in the receptor frame. For oth
 
 ## Inputs and run controls
 
-Mount custom inputs read-only and pass their container paths with `--receptor` and `--ligand`. Simulation length, reporting intervals, pressure, temperature, timestep, seed, and platform are configurable through the corresponding CLI flags. For a long run, mount an external results directory and use `--resume` with identical inputs and settings; the runner fingerprints membrane and orientation settings too.
+Mount custom inputs read-only and pass their container paths with `--receptor` and `--ligand`. Simulation length, reporting intervals, pressure, temperature, timestep, seed, and platform are configurable through the corresponding CLI flags. `--platform auto` probes usable OpenMM contexts in CUDA → OpenCL → CPU order and falls back when a platform cannot initialize; a named platform is checked directly and reports an error if unavailable. The selected platform is shared by membrane generation and dynamics. For a long run, mount an external results directory and use `--resume` with identical inputs and settings; the runner fingerprints membrane and orientation settings too.
 
 The short TRPV4 command above checks software execution and basic membrane construction, not scientific convergence or force-field validation. Inspect `system_final.pdb`, `system.gro`, and the trajectory to confirm the protein and ligand are embedded as intended before production runs.
+
+To check that a short TRPV4 run completed dynamics and produced a bilayer, water, both lipid leaflets, and an aligned protein–ligand pose, use the repository's validator from Docker after the runner exits successfully:
+
+```bash
+docker run --rm --entrypoint python \
+  -v "$HOME/openmm-protein-ligand-runner-results:/results:ro" \
+  openmm-protein-ligand-runner \
+  /app/validate_trpv4_membrane.py /results
+```
+
+The validator requires `run_state.json` to report a completed run and checks `membrane_geometry.json`, the final PDB, and non-empty trajectory. It is a structural smoke check, not a substitute for visual inspection or scientific validation.

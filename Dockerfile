@@ -42,6 +42,7 @@ RUN micromamba create -y -f /tmp/environment.yml && \
 
 ENV PATH=/opt/conda/envs/openmm-protein-ligand-runner/bin:$PATH
 COPY --chown=$MAMBA_USER:$MAMBA_USER run_prot_lig.py /app/run_prot_lig.py
+COPY --chown=$MAMBA_USER:$MAMBA_USER validate_trpv4_membrane.py /app/validate_trpv4_membrane.py
 COPY --chown=$MAMBA_USER:$MAMBA_USER input/ /app/input/
 
 USER $MAMBA_USER
