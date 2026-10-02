@@ -1,6 +1,6 @@
 # OpenMM runner
 
-Docker runner for protein–ligand simulations with OpenMM. `input/AQP3.pdb` and `input/rank1.sdf` are included as an example system. The Python environment, including `openmmforcefields`, is installed in the container from `environment.yml`.
+Docker runner for protein–ligand simulations. `input/` has an AQP3 solution test pair and a TRPV4–capsaicin membrane test pair. The default run is the existing solution workflow; pass `--membrane` to build a membrane, water, and ions together with OpenMM's `Modeller.addMembrane()`.
 
 ## Build
 
@@ -8,62 +8,48 @@ Docker runner for protein–ligand simulations with OpenMM. `input/AQP3.pdb` and
 docker build -t openmm-protein-ligand-runner .
 ```
 
-## Run the example
+The image pins the Python simulation dependencies and builds the standalone TmDet 4.0 method from release 4.1.2 for local receptor orientation.
 
-Choose a host directory for the results; it is mounted outside the project:
+## Solution run
 
 ```bash
 mkdir -p "$HOME/openmm-protein-ligand-runner-results"
 docker run --rm \
   -v "$HOME/openmm-protein-ligand-runner-results:/results" \
   openmm-protein-ligand-runner \
-  --receptor /app/input/AQP3.pdb \
-  --ligand /app/input/rank1.sdf \
+  --receptor /app/input/aqp3_solution_test_receptor.pdb \
+  --ligand /app/input/aqp3_solution_test_ligand.sdf \
   --output /results
 ```
 
-The default production stage is 500 ns. For a short smoke run, reduce the step counts and minimization iterations:
+## Membrane run: TRPV4
+
+The TmDet mode transforms both the receptor and ligand by the same rigid-body transform, preserving the binding pose:
 
 ```bash
 docker run --rm \
   -v "$HOME/openmm-protein-ligand-runner-results:/results" \
   openmm-protein-ligand-runner \
-  --receptor /app/input/AQP3.pdb \
-  --ligand /app/input/rank1.sdf \
+  --receptor /app/input/trpv4_membrane_test_receptor.pdb \
+  --ligand /app/input/trpv4_membrane_test_ligand.sdf \
   --output /results \
+  --membrane --orientation tmdet --lipid-type POPC \
+  --membrane-padding-nm 1.0 --ionic-strength-molar 0.15 \
   --nvt-steps 10 --npt-steps 10 --prod-steps 10 --minimize-iterations 10
 ```
 
-## Run another system
+Orientation choices:
 
-Mount the input directory read-only and pass the paths inside the container:
+- `--orientation tmdet` runs local TmDet and writes its oriented receptor (`tmdet_oriented.cif`) and annotation to the output directory.
+- `--orientation preoriented` uses coordinates as supplied. The receptor must have the membrane plane in XY and its center at `--membrane-center-z-nm`; the ligand SDF must use the same coordinate frame.
+- `--orientation manual` rotates the supplied membrane normal onto Z and translates the supplied point on the membrane center plane to `(0, 0, membrane-center-z)`. Example: `--orientation manual --manual-membrane-normal 0 0 1 --manual-membrane-center-angstrom 88 88 106`.
 
-```bash
-docker run --rm \
-  -v "$PWD/my-system:/data:ro" \
-  -v "$HOME/openmm-protein-ligand-runner-results:/results" \
-  openmm-protein-ligand-runner \
-  --receptor /data/receptor.pdb \
-  --ligand /data/ligand.sdf \
-  --output /results
-```
+The first version supports one lipid type per bilayer (`POPC`, `POPE`, `DLPC`, `DLPE`, `DMPC`, `DOPC`, or `DPPC`). `Modeller.addMembrane()` creates both leaflets, water, and ions; do not add solvent separately. Membrane mode uses Amber ff14SB, Lipid17, TIP3P, and OpenFF ligand parameters, plus a membrane barostat during NPT.
 
-The runner validates the input files, requires one ligand with a 3D conformer, and checks all step counts and intervals before simulation. It accepts `--receptor`, `--ligand`, `--output`, `--nvt-steps`, `--npt-steps`, `--prod-steps`, `--report-interval`, `--xtc-interval`, `--checkpoint-interval`, and `--minimize-iterations`.
+The included TRPV4 ligand coordinates are already in the receptor frame. For other inputs, the SDF must describe the ligand pose in the supplied receptor coordinates; TmDet/manual orientation applies the same rigid transform to both.
 
-Temperature, pressure, friction, timestep, solvent padding, ionic strength, random seed, and platform are configurable with `--temperature-k`, `--pressure-bar`, `--friction-per-ps`, `--timestep-fs`, `--padding-nm`, `--ionic-strength-molar`, `--seed`, and `--platform`. The `auto` platform choice checks CUDA, OpenCL, CPU, then Reference. The included conda-forge image is intended for CPU; GPU use needs a compatible GPU-enabled runtime and OpenMM build.
+## Inputs and run controls
 
-The runner periodically writes a checkpoint for the active phase (`checkpoint-nvt.chk`, `checkpoint-npt.chk`, or `checkpoint-prod.chk`) and stores the active phase and input/configuration fingerprint in `run_state.json`. To continue an interrupted run, use the same input files and simulation settings, keep the same results directory, and add `--resume`:
+Mount custom inputs read-only and pass their container paths with `--receptor` and `--ligand`. Simulation length, reporting intervals, pressure, temperature, timestep, seed, and platform are configurable through the corresponding CLI flags. For a long run, mount an external results directory and use `--resume` with identical inputs and settings; the runner fingerprints membrane and orientation settings too.
 
-```bash
-docker run --rm \
-  -v "$HOME/openmm-protein-ligand-runner-results:/results" \
-  openmm-protein-ligand-runner \
-  --receptor /app/input/AQP3.pdb \
-  --ligand /app/input/rank1.sdf \
-  --output /results \
-  --resume
-```
-
-Checkpoints require the same OpenMM version and platform. The runner checks the recorded settings and input file hashes before loading one. The trajectory and CSV continue in append mode after resume. A completed run writes `final_state.xml`; `--resume` is only for incomplete runs.
-
-For Docker Compose, set `RESULTS_DIR` to a host directory outside this project. Its default is `../openmm-protein-ligand-runner-results`.
+The short TRPV4 command above checks software execution and basic membrane construction, not scientific convergence or force-field validation. Inspect `system_final.pdb`, `system.gro`, and the trajectory to confirm the protein and ligand are embedded as intended before production runs.

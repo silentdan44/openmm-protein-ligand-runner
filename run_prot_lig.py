@@ -4,6 +4,8 @@ import json
 import logging
 import math
 import random
+import shutil
+import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -49,8 +51,12 @@ def positive_float(value):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run a protein-ligand OpenMM simulation.")
-    parser.add_argument("--receptor", default="input/AQP3.pdb", help="Receptor PDB path")
-    parser.add_argument("--ligand", default="input/rank1.sdf", help="Single-ligand SDF path")
+    parser.add_argument(
+        "--receptor", default="input/aqp3_solution_test_receptor.pdb", help="Receptor PDB path"
+    )
+    parser.add_argument(
+        "--ligand", default="input/aqp3_solution_test_ligand.sdf", help="Single-ligand SDF path"
+    )
     parser.add_argument("--output", default="output", help="Output directory")
     parser.add_argument("--nvt-steps", type=positive_int, default=250_000)
     parser.add_argument("--npt-steps", type=positive_int, default=500_000)
@@ -65,12 +71,182 @@ def parse_args():
     parser.add_argument("--timestep-fs", type=positive_float, default=TIMESTEP_FS)
     parser.add_argument("--ionic-strength-molar", type=float, default=IONIC_STRENGTH_MOLAR)
     parser.add_argument("--padding-nm", type=positive_float, default=PADDING_NM)
+    parser.add_argument("--membrane", action="store_true", help="Build a lipid membrane and water system")
+    parser.add_argument(
+        "--orientation", choices=("tmdet", "preoriented", "manual"), default="tmdet",
+        help="How to orient the receptor for a membrane run",
+    )
+    parser.add_argument(
+        "--lipid-type", choices=("POPC", "POPE", "DLPC", "DLPE", "DMPC", "DOPC", "DPPC"),
+        default="POPC", help="Single lipid type for the membrane",
+    )
+    parser.add_argument("--membrane-center-z-nm", type=float, default=0.0)
+    parser.add_argument("--membrane-padding-nm", type=positive_float, default=1.0)
+    parser.add_argument("--manual-membrane-normal", type=float, nargs=3, metavar=("X", "Y", "Z"))
+    parser.add_argument(
+        "--manual-membrane-center-angstrom", type=float, nargs=3, metavar=("X", "Y", "Z"),
+        help="Point on the bilayer center plane in the input coordinates",
+    )
     parser.add_argument("--seed", type=positive_int, default=2026)
     parser.add_argument(
         "--platform", choices=("auto", "CUDA", "OpenCL", "CPU", "Reference"), default="auto"
     )
     parser.add_argument("--resume", action="store_true", help="Resume from the checkpoint in run_state.json")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.membrane:
+        if not math.isfinite(args.membrane_center_z_nm):
+            parser.error("--membrane-center-z-nm must be finite")
+        if args.orientation == "manual":
+            if args.manual_membrane_normal is None or args.manual_membrane_center_angstrom is None:
+                parser.error("manual membrane orientation requires --manual-membrane-normal and --manual-membrane-center-angstrom")
+            if not all(math.isfinite(value) for value in args.manual_membrane_normal + args.manual_membrane_center_angstrom):
+                parser.error("manual membrane coordinates must be finite")
+            if math.sqrt(sum(value * value for value in args.manual_membrane_normal)) < 1e-8:
+                parser.error("--manual-membrane-normal must be nonzero")
+        elif args.manual_membrane_normal is not None or args.manual_membrane_center_angstrom is not None:
+            parser.error("manual orientation parameters are only valid with --orientation manual")
+    return args
+
+
+def vector_rotation(source, target):
+    """Return a 3x3 rotation matrix that maps source onto target."""
+    import numpy as np
+
+    source = np.asarray(source, dtype=float)
+    target = np.asarray(target, dtype=float)
+    source /= np.linalg.norm(source)
+    target /= np.linalg.norm(target)
+    cross = np.cross(source, target)
+    sine = np.linalg.norm(cross)
+    cosine = float(np.dot(source, target))
+    if sine < 1e-12:
+        if cosine > 0:
+            return np.eye(3)
+        axis = np.array([1.0, 0.0, 0.0])
+        if abs(source[0]) > 0.9:
+            axis = np.array([0.0, 1.0, 0.0])
+        axis -= source * np.dot(axis, source)
+        axis /= np.linalg.norm(axis)
+        return 2.0 * np.outer(axis, axis) - np.eye(3)
+    axis = cross / sine
+    skew = np.array([[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]])
+    return np.eye(3) + skew * sine + (skew @ skew) * (1.0 - cosine)
+
+
+def transform_positions(positions, rotation, source_center, target_center):
+    import numpy as np
+
+    coords = np.asarray(positions.value_in_unit(u.nanometers), dtype=float)
+    transformed = (coords - source_center) @ rotation.T + target_center
+    return transformed * u.nanometers
+
+
+def atom_signature(atom):
+    return (atom.residue.chain.id, atom.residue.id, atom.residue.name, atom.name)
+
+
+def membrane_geometry_summary(topology, positions, lipid_type, membrane_center_z_nm):
+    import numpy as np
+
+    coords = np.asarray(positions.value_in_unit(u.nanometers), dtype=float)
+    groups = {"protein": [], "ligand": [], "lipid": [], "water": []}
+    protein_coords = []
+    ligand_coords = []
+    for atom in topology.atoms():
+        if atom.element is None or atom.element.symbol == "H":
+            continue
+        residue_name = atom.residue.name
+        xyz = coords[atom.index]
+        if residue_name in PROTEIN_RESIDUES:
+            groups["protein"].append(xyz)
+            protein_coords.append(xyz)
+        elif residue_name == "LIG":
+            groups["ligand"].append(xyz)
+            ligand_coords.append(xyz)
+        elif residue_name == lipid_type:
+            groups["lipid"].append(xyz)
+        elif residue_name in {"HOH", "WAT", "SOL"}:
+            groups["water"].append(xyz)
+    result = {}
+    for name, atoms in groups.items():
+        array = np.asarray(atoms, dtype=float)
+        result[name] = {
+            "heavy_atom_count": int(len(array)),
+            "z_range_nm": [float(array[:, 2].min()), float(array[:, 2].max())] if len(array) else None,
+            "z_mean_nm": float(array[:, 2].mean()) if len(array) else None,
+        }
+    lipid_z = np.asarray(groups["lipid"], dtype=float)[:, 2]
+    result["lipid_leaflets"] = {
+        "below_center_heavy_atoms": int(np.sum(lipid_z < membrane_center_z_nm)),
+        "above_center_heavy_atoms": int(np.sum(lipid_z > membrane_center_z_nm)),
+    }
+    if protein_coords and ligand_coords:
+        delta = np.asarray(ligand_coords)[:, None, :] - np.asarray(protein_coords)[None, :, :]
+        result["minimum_ligand_protein_heavy_distance_nm"] = float(
+            np.sqrt(np.sum(delta * delta, axis=2)).min()
+        )
+    return result
+
+
+def get_tmdet_transform(topology, positions, receptor_path, output_dir):
+    """Run standalone TmDet and recover its rigid transform from matched heavy atoms."""
+    import numpy as np
+
+    executable = shutil.which("tmdet")
+    if executable is None:
+        raise RuntimeError("TmDet was requested but the tmdet executable is not installed")
+    oriented_path = output_dir / "tmdet_oriented.cif"
+    annotation_path = output_dir / "tmdet_annotation.xml"
+    command = [executable, "-pi", str(receptor_path), "-po", str(oriented_path), "-x", str(annotation_path)]
+    logger.info("Running TmDet: %s", " ".join(command))
+    completed = subprocess.run(command, text=True, capture_output=True)
+    (output_dir / "tmdet.log").write_text(completed.stdout + completed.stderr)
+    if completed.returncode != 0 or not oriented_path.is_file():
+        raise RuntimeError(f"TmDet failed (exit {completed.returncode}); see {output_dir / 'tmdet.log'}")
+    oriented = app.PDBxFile(str(oriented_path))
+    source_atoms = {atom_signature(a): a.index for a in topology.atoms() if a.element is not None and a.element.symbol != "H"}
+    target_atoms = {atom_signature(a): a.index for a in oriented.topology.atoms() if a.element is not None and a.element.symbol != "H"}
+    keys = sorted(source_atoms.keys() & target_atoms.keys())
+    if len(keys) < 100:
+        raise RuntimeError(f"TmDet output matches only {len(keys)} receptor heavy atoms; cannot safely transfer orientation")
+    source = np.asarray([positions[source_atoms[k]].value_in_unit(u.nanometers) for k in keys])
+    target = np.asarray([oriented.positions[target_atoms[k]].value_in_unit(u.nanometers) for k in keys])
+    source_center = source.mean(axis=0)
+    target_center = target.mean(axis=0)
+    covariance = (source - source_center).T @ (target - target_center)
+    left, _, right = np.linalg.svd(covariance)
+    correction = np.eye(3)
+    correction[2, 2] = np.linalg.det(right.T @ left.T)
+    rotation = right.T @ correction @ left.T
+    fitted = (source - source_center) @ rotation.T + target_center
+    rmsd = float(np.sqrt(np.mean(np.sum((fitted - target) ** 2, axis=1))))
+    if rmsd > 0.02:
+        raise RuntimeError(f"TmDet transform is not rigid (matched-atom RMSD {rmsd:.4f} nm)")
+    logger.info("Recovered TmDet rigid transform from %d heavy atoms (RMSD %.4f nm)", len(keys), rmsd)
+    return rotation, source_center, target_center
+
+
+def prepare_membrane_orientation(args, fixer, ligand_positions, receptor_path, output_dir):
+    import numpy as np
+
+    if args.orientation == "preoriented":
+        return fixer.positions, ligand_positions
+    if args.orientation == "tmdet":
+        rotation, source_center, target_center = get_tmdet_transform(
+            fixer.topology, fixer.positions, receptor_path, output_dir
+        )
+        target_center = target_center.copy()
+        target_center[2] += args.membrane_center_z_nm
+    else:
+        normal = np.asarray(args.manual_membrane_normal, dtype=float)
+        center = np.asarray(args.manual_membrane_center_angstrom, dtype=float) / 10.0
+        rotation = vector_rotation(normal, (0.0, 0.0, 1.0))
+        source_center = center
+        target_center = np.asarray((0.0, 0.0, args.membrane_center_z_nm))
+    return (
+        transform_positions(fixer.positions, rotation, source_center, target_center),
+        transform_positions(ligand_positions, rotation, source_center, target_center),
+    )
 
 
 def add_positional_restraints(system, positions, atom_indices, k):
@@ -85,11 +261,21 @@ def add_positional_restraints(system, positions, atom_indices, k):
 
 
 def make_barostat(args):
-    barostat = mm.MonteCarloBarostat(
-        args.pressure_bar * u.bar,
-        args.temperature_k * u.kelvin,
-        25,
-    )
+    if args.membrane:
+        barostat = mm.MonteCarloMembraneBarostat(
+            args.pressure_bar * u.bar,
+            0.0 * u.bar * u.nanometer,
+            args.temperature_k * u.kelvin,
+            mm.MonteCarloMembraneBarostat.XYIsotropic,
+            mm.MonteCarloMembraneBarostat.ZFree,
+            25,
+        )
+    else:
+        barostat = mm.MonteCarloBarostat(
+            args.pressure_bar * u.bar,
+            args.temperature_k * u.kelvin,
+            25,
+        )
     barostat.setRandomNumberSeed(derived_seed(args.seed, 1))
     return barostat
 
@@ -131,12 +317,21 @@ def run_configuration(args, receptor, ligand):
         "timestep_fs": args.timestep_fs,
         "ionic_strength_molar": args.ionic_strength_molar,
         "padding_nm": args.padding_nm,
+        "membrane": args.membrane,
+        "orientation": args.orientation if args.membrane else None,
+        "lipid_type": args.lipid_type if args.membrane else None,
+        "membrane_center_z_nm": args.membrane_center_z_nm if args.membrane else None,
+        "membrane_padding_nm": args.membrane_padding_nm if args.membrane else None,
+        "manual_membrane_normal": args.manual_membrane_normal if args.membrane else None,
+        "manual_membrane_center_angstrom": args.manual_membrane_center_angstrom if args.membrane else None,
         "seed": args.seed,
         "minimize_iterations": args.minimize_iterations,
         "protein_forcefield": PROTEIN_FF,
+        "lipid_forcefield": "amber14/lipid17.xml" if args.membrane else None,
         "water_forcefield": WATER_FF,
         "software": {
             "openmm": mm.__version__,
+            "tmdet": "4.1.2" if args.membrane and args.orientation == "tmdet" else None,
             "openff_toolkit": package_version("openff-toolkit"),
             "openff_interchange": package_version("openff-interchange"),
             "openmmforcefields": package_version("openmmforcefields"),
@@ -238,6 +433,13 @@ def main():
 
         logger.info("Preparing receptor %s with PDBFixer", receptor_path)
         fixer = PDBFixer(filename=str(receptor_path))
+        ligand_topology = Topology.from_molecules([ligand]).to_openmm()
+        ligand_positions = off_to_omm(ligand.conformers[0])
+        if args.membrane:
+            fixer.positions, ligand_positions = prepare_membrane_orientation(
+                args, fixer, ligand_positions, receptor_path, output_dir
+            )
+            logger.info("Membrane orientation mode: %s", args.orientation)
         modeller = app.Modeller(fixer.topology, fixer.positions)
         hydrogens = [atom for atom in modeller.topology.atoms() if atom.element.symbol == "H"]
         modeller.delete(hydrogens)
@@ -250,28 +452,78 @@ def main():
         fixer.addMissingAtoms()
 
         smirnoff = SMIRNOFFTemplateGenerator(molecules=ligand)
-        forcefield = app.ForceField(PROTEIN_FF, WATER_FF)
+        forcefield_files = [PROTEIN_FF]
+        if args.membrane:
+            forcefield_files.append("amber14/lipid17.xml")
+        forcefield_files.append(WATER_FF)
+        forcefield = app.ForceField(*forcefield_files)
         forcefield.registerTemplateGenerator(smirnoff.generator)
         modeller = app.Modeller(fixer.topology, fixer.positions)
 
-        ligand_topology = Topology.from_molecules([ligand]).to_openmm()
-        ligand_positions = off_to_omm(ligand.conformers[0])
         for residue in ligand_topology.residues():
             residue.name = "LIG"
         modeller.add(ligand_topology, ligand_positions)
 
-        logger.info("Adding hydrogens and solvating system")
+        logger.info("Adding hydrogens and %s", "membrane plus water" if args.membrane else "solvent")
         python_rng_state = random.getstate()
         random.seed(args.seed)
         try:
             modeller.addHydrogens(forcefield=forcefield, pH=7.0)
-            modeller.addSolvent(
-                forcefield,
-                padding=args.padding_nm * u.nanometer,
-                ionicStrength=args.ionic_strength_molar * u.molar,
-            )
+            if args.membrane:
+                modeller.addMembrane(
+                    forcefield,
+                    lipidType=args.lipid_type,
+                    membraneCenterZ=args.membrane_center_z_nm * u.nanometer,
+                    minimumPadding=args.membrane_padding_nm * u.nanometer,
+                    ionicStrength=args.ionic_strength_molar * u.molar,
+                )
+            else:
+                modeller.addSolvent(
+                    forcefield,
+                    padding=args.padding_nm * u.nanometer,
+                    ionicStrength=args.ionic_strength_molar * u.molar,
+                )
         finally:
             random.setstate(python_rng_state)
+
+        if args.membrane:
+            residues = list(modeller.topology.residues())
+            lipid_residues = [residue for residue in residues if residue.name == args.lipid_type]
+            water_residues = [residue for residue in residues if residue.name in {"HOH", "WAT", "SOL"}]
+            if len(lipid_residues) < 10 or not water_residues:
+                raise ValueError(
+                    f"Membrane builder produced {len(lipid_residues)} {args.lipid_type} residues and "
+                    f"{len(water_residues)} waters; expected a membrane and solvated system"
+                )
+            logger.info(
+                "Built membrane system: %d %s lipids, %d water residues, box=%s",
+                len(lipid_residues), args.lipid_type, len(water_residues),
+                modeller.topology.getPeriodicBoxVectors(),
+            )
+            geometry = membrane_geometry_summary(
+                modeller.topology, modeller.positions, args.lipid_type, args.membrane_center_z_nm
+            )
+            lipid_leaflets = geometry["lipid_leaflets"]
+            if not lipid_leaflets["below_center_heavy_atoms"] or not lipid_leaflets["above_center_heavy_atoms"]:
+                raise ValueError("Membrane builder did not produce lipid atoms in both leaflets")
+            protein_z = geometry["protein"]["z_range_nm"]
+            if protein_z is None or not protein_z[0] < args.membrane_center_z_nm < protein_z[1]:
+                raise ValueError("The receptor does not span the requested membrane center plane")
+            ligand_distance = geometry.get("minimum_ligand_protein_heavy_distance_nm")
+            if ligand_distance is None or ligand_distance > 0.8:
+                raise ValueError(
+                    "The transformed ligand is not near the receptor "
+                    f"(minimum heavy-atom distance {ligand_distance} nm)"
+                )
+            box_vectors = modeller.topology.getPeriodicBoxVectors()
+            geometry["box_vectors_nm"] = [
+                [float(value) for value in vector.value_in_unit(u.nanometer)] for vector in box_vectors
+            ]
+            (output_dir / "membrane_geometry.json").write_text(json.dumps(geometry, indent=2) + "\n")
+            logger.info(
+                "Membrane geometry: protein z=%s nm, lipid z=%s nm, minimum ligand-protein distance=%.3f nm",
+                geometry["protein"]["z_range_nm"], geometry["lipid"]["z_range_nm"], ligand_distance,
+            )
 
         with open(output_dir / "system_final.pdb", "w") as pdb_file:
             app.PDBFile.writeFile(modeller.topology, modeller.positions, pdb_file)

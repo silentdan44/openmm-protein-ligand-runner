@@ -6,9 +6,9 @@ services:
     image: openmm-protein-ligand-runner:local
     command:
       - --receptor
-      - /data/AQP3.pdb
+      - /data/aqp3_solution_test_receptor.pdb
       - --ligand
-      - /data/rank1.sdf
+      - /data/aqp3_solution_test_ligand.sdf
       - --output
       - /results
       - --nvt-steps
