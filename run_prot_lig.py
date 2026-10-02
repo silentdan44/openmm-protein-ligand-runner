@@ -91,6 +91,10 @@ def parse_args():
     parser.add_argument(
         "--platform", choices=("auto", "CUDA", "OpenCL", "CPU", "Reference"), default="auto"
     )
+    parser.add_argument(
+        "--skip-gromacs-export", action="store_true",
+        help="Skip OpenFF Interchange conversion to GROMACS files (useful for large membrane systems)",
+    )
     parser.add_argument("--resume", action="store_true", help="Resume from the checkpoint in run_state.json")
     args = parser.parse_args()
     if args.membrane:
@@ -200,7 +204,13 @@ def get_tmdet_transform(topology, positions, receptor_path, output_dir):
         raise RuntimeError("TmDet was requested but the tmdet executable is not installed")
     oriented_path = output_dir / "tmdet_oriented.cif"
     annotation_path = output_dir / "tmdet_annotation.xml"
-    command = [executable, "-pi", str(receptor_path), "-po", str(oriented_path), "-x", str(annotation_path)]
+    command = [
+        executable,
+        "-e", "/app/tmdet.env",
+        "-pi", str(receptor_path),
+        "-po", str(oriented_path),
+        "-x", str(annotation_path),
+    ]
     logger.info("Running TmDet: %s", " ".join(command))
     completed = subprocess.run(command, text=True, capture_output=True)
     (output_dir / "tmdet.log").write_text(completed.stdout + completed.stderr)
@@ -357,6 +367,7 @@ def run_configuration(args, receptor, ligand):
         "manual_membrane_center_angstrom": args.manual_membrane_center_angstrom if args.membrane else None,
         "seed": args.seed,
         "minimize_iterations": args.minimize_iterations,
+        "skip_gromacs_export": args.skip_gromacs_export,
         "protein_forcefield": PROTEIN_FF,
         "lipid_forcefield": "amber14/lipid17.xml" if args.membrane else None,
         "water_forcefield": WATER_FF,
@@ -514,7 +525,6 @@ def main():
                     membraneCenterZ=args.membrane_center_z_nm * u.nanometer,
                     minimumPadding=args.membrane_padding_nm * u.nanometer,
                     ionicStrength=args.ionic_strength_molar * u.molar,
-                    platform=platform,
                 )
             else:
                 modeller.addSolvent(
@@ -577,13 +587,16 @@ def main():
         for index, residue in enumerate(modeller.topology.residues()):
             residue.id = str(index + 1)
 
-        interchange = Interchange.from_openmm(
-            topology=modeller.topology, system=system, positions=modeller.positions
-        )
-        if modeller.topology.getPeriodicBoxVectors():
-            interchange.box = modeller.topology.getPeriodicBoxVectors()
-        interchange.to_top(str(output_dir / "system.top"))
-        interchange.to_gro(str(output_dir / "system.gro"))
+        if args.skip_gromacs_export:
+            logger.info("Skipping GROMACS export as requested")
+        else:
+            interchange = Interchange.from_openmm(
+                topology=modeller.topology, system=system, positions=modeller.positions
+            )
+            if modeller.topology.getPeriodicBoxVectors():
+                interchange.box = modeller.topology.getPeriodicBoxVectors()
+            interchange.to_top(str(output_dir / "system.top"))
+            interchange.to_gro(str(output_dir / "system.gro"))
 
         protein_indices = [
             atom.index for atom in modeller.topology.atoms() if atom.residue.name in PROTEIN_RESIDUES

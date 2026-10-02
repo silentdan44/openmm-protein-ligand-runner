@@ -40,6 +40,31 @@ COPY --chown=$MAMBA_USER:$MAMBA_USER environment.yml /tmp/environment.yml
 RUN micromamba create -y -f /tmp/environment.yml && \
     micromamba clean --all --yes
 
+# TmDet requires an environment file even when an input structure is supplied
+# by path. Keep its downloaded CCD and cache data inside the container.
+RUN mkdir -p /app /work/data/ccd /work/cache /home/data/wwPDB/status /home/data/wwPDB/data/structures/divided/pdb /home/data/wwPDB/data/structures/divided/updated_mmcif && \
+    printf '%s\n' \
+      'APP_NAME=tmdet' \
+      'VERSION=4.1.1' \
+      'PDB_DATA_ROOT=/home/data/wwPDB' \
+      'PDB_STATUS_DIR=/home/data/wwPDB/status' \
+      'PDB_DATA_DIR=/home/data/wwPDB/data' \
+      'PDB_ENT_DIR=/home/data/wwPDB/data/structures/divided/pdb' \
+      'PDB_CIF_DIR=/home/data/wwPDB/data/structures/divided/updated_mmcif' \
+      'PDB_CIF_EXT=_updated.cif.gz' \
+      'TMDET_DATA_ROOT=/work/data' \
+      'TMDET_CACHE_ROOT=/work/cache' \
+      'TMDET_CC_DIR=/work/data/ccd' \
+      'TMDET_CC_FILE=/work/data/ccd/components.cif.gz' \
+      'TMDET_CC_URL=https://files.wwpdb.org/pub/pdb/data/monomers/components.cif.gz' \
+      'TMDET_POLYMER_FILTER_FILE=/work/data/polymer_filter.txt' \
+      'TMDET_MIN_NUMBER_OF_RESIDUES_IN_CHAIN=15' \
+      'TMDET_BALL_DIST=0.20' \
+      'TMDET_SURF_PROBSIZE=1.4' \
+      'TMDET_SURF_ZSLICE=0.05' \
+      'TMDET_SURF_DIST=0.1' > /app/tmdet.env && \
+    chown -R "$MAMBA_USER:$MAMBA_USER" /app/tmdet.env /work /home/data/wwPDB
+
 ENV PATH=/opt/conda/envs/openmm-protein-ligand-runner/bin:$PATH
 COPY --chown=$MAMBA_USER:$MAMBA_USER run_prot_lig.py /app/run_prot_lig.py
 COPY --chown=$MAMBA_USER:$MAMBA_USER validate_trpv4_membrane.py /app/validate_trpv4_membrane.py
