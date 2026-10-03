@@ -67,3 +67,13 @@ docker run --rm \
 Checkpoints require the same OpenMM version and platform. The runner checks the recorded settings and input file hashes before loading one. The trajectory and CSV continue in append mode after resume. A completed run writes `final_state.xml`; `--resume` is only for incomplete runs.
 
 For Docker Compose, set `RESULTS_DIR` to a host directory outside this project. Its default is `../openmm-protein-ligand-runner-results`.
+
+## Stability diagnostics
+
+The runner warns about possible severe nonbonded atom overlaps in prepared coordinates. During dynamics it checks reported energy and kinetic temperature for non-finite values, extreme temperature, or a large energy jump. If a run fails, `failure_diagnostics.json` records the phase, last step and metrics, likely explanation, suggested next step, original error, and any close atom pairs. These checks identify warning signs; they do not prove the cause. Overlap distances use a conservative covalent-radius threshold, and close pairs should be inspected before changing the structure.
+
+Run the dependency-light diagnostic checks with:
+
+```bash
+python -m unittest discover -s tests -v
+```
