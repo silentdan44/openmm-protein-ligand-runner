@@ -53,3 +53,35 @@ The included TRPV4 ligand coordinates are already in the receptor frame. For oth
 Mount custom inputs read-only and pass their container paths with `--receptor` and `--ligand`. Simulation length, reporting intervals, pressure, temperature, timestep, seed, and platform are configurable through the corresponding CLI flags. For a long run, mount an external results directory and use `--resume` with identical inputs and settings; the runner fingerprints membrane and orientation settings too.
 
 The short TRPV4 command above checks software execution and basic membrane construction, not scientific convergence or force-field validation. Inspect `system_final.pdb`, `system.gro`, and the trajectory to confirm the protein and ligand are embedded as intended before production runs.
+
+## Diagnostics and MMPBSA
+
+After production, the runner writes `analysis/diagnostics.png`, `analysis/protein_rmsf.png`, `analysis/metrics.json`, and `analysis/report.html`. The plots show temperature and energy across NVT/NPT/production, NPT density and box volume, protein-backbone and ligand RMSD, protein/ligand radius of gyration, protein–ligand residue contacts, and protein Cα RMSF. Coordinates are made whole and the protein is fitted before structural metrics are calculated; RMSD/RMSF/Rg/contact plots and the prepared MMPBSA trajectory use production frames only. The analysis loads every 10th saved trajectory frame by default to limit memory; use `--analysis-stride 1` to analyze every saved frame. Temperature and NPT density/volume are diagnostics, not proof of convergence. OpenMM's `StateDataReporter` does not report instantaneous pressure, so the barostat plot checks volume and density against the configured pressure target.
+
+Rebuild the report later, or start the optional end-state calculation, from an existing result directory:
+
+```bash
+docker run --rm --entrypoint python \
+  -v "$HOME/openmm-protein-ligand-runner-results:/results" \
+  openmm-protein-ligand-runner /app/analyze_run.py --output /results
+
+docker run --rm --entrypoint python \
+  -v "$HOME/openmm-protein-ligand-runner-results:/results" \
+  openmm-protein-ligand-runner /app/analyze_run.py --output /results --mmpbsa \
+  --mmpbsa-model gb --mmpbsa-interval 2
+```
+
+Alternatively, pass `--mmpbsa` to the simulation command to run the default single-trajectory GB calculation immediately after MD. Use `--mmpbsa-model pb` for PB. GB/PB without a membrane model does not represent the bilayer dielectric; for a membrane PB slab, choose `--mmpbsa-model pb_mem` and provide `--mmpbsa-membrane-thickness-angstrom`; `--mmpbsa-membrane-dielectric` defaults to 7.0. `gmx_MMPBSA` needs GROMACS and AmberTools, included in the expanded Conda image, and uses the OpenMM-exported complex topology plus `analysis/index.ndx` and the fitted trajectory. Results and logs are in `analysis/mmpbsa/`.
+
+MMPBSA is an approximate end-state estimate, not an absolute binding free energy or a substitute for convergence checks. The OpenMM-to-GROMACS topology conversion, especially for OpenFF ligands and membrane force fields, must be validated for each system; inspect `gmx_MMPBSA.log` and confirm the generated topology/index selections before interpreting results. Increase sampling or run independent replicas for quantitative comparisons.
+
+The end-to-end Docker smoke test completed on the included AQP3 ligand example with `--nvt-steps 20 --npt-steps 20 --prod-steps 200 --mmpbsa --mmpbsa-model gb --mmpbsa-interval 1`. OpenMM completed and `gmx_MMPBSA` 1.7.0 exited successfully after processing 11 frames; `FINAL_RESULTS_MMPBSA.dat` and `.csv` were written. This short run checks execution only, not equilibration or convergence. The GROMACS topology is exported without bond constraints so ParmEd retains constrained H–X bond connectivity for Amber topology and PB radii conversion; OpenMM dynamics still use H-bond constraints.
+
+Run the unit tests with:
+
+```bash
+docker run --rm -w /work \
+  -v "$PWD:/work:ro" \
+  --entrypoint python openmm-protein-ligand-runner \
+  -m unittest discover -s tests -v
+```

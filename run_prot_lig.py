@@ -92,6 +92,22 @@ def parse_args():
         "--platform", choices=("auto", "CUDA", "OpenCL", "CPU", "Reference"), default="auto"
     )
     parser.add_argument("--resume", action="store_true", help="Resume from the checkpoint in run_state.json")
+    parser.add_argument(
+        "--mmpbsa", action="store_true",
+        help="Run an optional single-trajectory gmx_MMPBSA analysis after MD (GB by default)",
+    )
+    parser.add_argument(
+        "--mmpbsa-model", choices=("gb", "pb", "pb_mem"), default="gb",
+        help="Implicit-solvent model for --mmpbsa; pb_mem requires a membrane thickness",
+    )
+    parser.add_argument("--mmpbsa-interval", type=positive_int, default=1,
+                        help="Analyze every Nth saved frame in gmx_MMPBSA")
+    parser.add_argument("--analysis-stride", type=positive_int, default=10,
+                        help="Load every Nth XTC frame for plots and the prepared MMPBSA trajectory")
+    parser.add_argument("--mmpbsa-membrane-thickness-angstrom", type=positive_float,
+                        help="Required membrane slab thickness for --mmpbsa-model pb_mem")
+    parser.add_argument("--mmpbsa-membrane-dielectric", type=positive_float, default=7.0,
+                        help="Membrane dielectric used by the pb_mem model (default: 7)")
     args = parser.parse_args()
     if args.membrane:
         if not math.isfinite(args.membrane_center_z_nm):
@@ -385,6 +401,10 @@ def main():
             raise SystemExit(f"{label} file does not exist or is not a file: {path}")
     if not math.isfinite(args.ionic_strength_molar) or args.ionic_strength_molar < 0:
         raise SystemExit("--ionic-strength-molar must be a finite number that is zero or greater")
+    if args.mmpbsa_model == "pb_mem" and args.mmpbsa and args.mmpbsa_membrane_thickness_angstrom is None:
+        raise SystemExit("--mmpbsa-model pb_mem requires --mmpbsa-membrane-thickness-angstrom")
+    if args.mmpbsa_model == "pb_mem" and not args.membrane and args.mmpbsa:
+        raise SystemExit("--mmpbsa-model pb_mem is only valid with --membrane")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     resume = args.resume
@@ -534,11 +554,22 @@ def main():
             nonbondedCutoff=1.0 * u.nanometer,
             constraints=app.HBonds,
         )
+        # Interchange omits constrained H-X bonds from the GROMACS [ bonds ]
+        # section. ParmEd (used by gmx_MMPBSA) needs those bonds to assign
+        # bonded hydrogen radii and build a chemically connected Amber topology.
+        # Export a second, otherwise identical system without constraints;
+        # keep the constrained system above for the actual OpenMM dynamics.
+        topology_system = forcefield.createSystem(
+            modeller.topology,
+            nonbondedMethod=app.PME,
+            nonbondedCutoff=1.0 * u.nanometer,
+            constraints=None,
+        )
         for index, residue in enumerate(modeller.topology.residues()):
             residue.id = str(index + 1)
 
         interchange = Interchange.from_openmm(
-            topology=modeller.topology, system=system, positions=modeller.positions
+            topology=modeller.topology, system=topology_system, positions=modeller.positions
         )
         if modeller.topology.getPeriodicBoxVectors():
             interchange.box = modeller.topology.getPeriodicBoxVectors()
@@ -609,11 +640,13 @@ def main():
             [
                 app.StateDataReporter(
                     sys.stdout, args.report_interval, step=True, potentialEnergy=True,
-                    kineticEnergy=True, density=True, temperature=True, speed=True, separator="\t"
+                    kineticEnergy=True, totalEnergy=True, volume=True, density=True,
+                    temperature=True, speed=True, separator="\t"
                 ),
                 app.StateDataReporter(
                     str(state_data_file), args.report_interval, step=True, potentialEnergy=True,
-                    kineticEnergy=True, density=True, temperature=True, speed=True,
+                    kineticEnergy=True, totalEnergy=True, volume=True, density=True,
+                    temperature=True, speed=True,
                     separator=",", append=append_outputs
                 ),
                 app.XTCReporter(
@@ -670,6 +703,26 @@ def main():
             simulation.saveState(str(output_dir / "final_state.xml"))
             checkpoint("complete")
             logger.info("Simulation completed at step %d", simulation.currentStep)
+            from trajectory_analysis import analyze_run
+
+            analyze_run(
+                output_dir,
+                {
+                    **config,
+                    "nvt_steps": args.nvt_steps,
+                    "npt_steps": args.npt_steps,
+                    "prod_steps": args.prod_steps,
+                    "timestep_fs": args.timestep_fs,
+                    "temperature_k": args.temperature_k,
+                    "pressure_bar": args.pressure_bar,
+                },
+                perform_mmpbsa=args.mmpbsa,
+                mmpbsa_model=args.mmpbsa_model,
+                mmpbsa_interval=args.mmpbsa_interval,
+                mmpbsa_membrane_thickness_angstrom=args.mmpbsa_membrane_thickness_angstrom,
+                mmpbsa_membrane_dielectric=args.mmpbsa_membrane_dielectric,
+                analysis_stride=args.analysis_stride,
+            )
 
     except Exception:
         logger.exception("Simulation failed")
