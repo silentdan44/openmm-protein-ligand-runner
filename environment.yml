@@ -8,3 +8,15 @@ dependencies:
   - openff-toolkit=0.16.5
   - openff-interchange=0.4.1
   - openmmforcefields=0.15
+  - numpy>=1.26.4,<2
+  - matplotlib>=3.8,<4
+  - mdtraj>=1.10,<2
+  - pandas>=2.2,<3
+  - scipy>=1.14.1,<2
+  - seaborn>=0.13,<0.14
+  - mpi4py>=4.0.1,<5
+  - ambertools>=24.8,<27
+  - gromacs>=2022,<2027
+  - pip
+  - pip:
+      - gmx_MMPBSA>=1.7.0,<2

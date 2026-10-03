@@ -77,5 +77,26 @@ The runner warns about possible severe nonbonded atom overlaps in prepared coord
 Run the dependency-light diagnostic checks in the project Docker image:
 
 ```bash
-docker run --rm --entrypoint python openmm-protein-ligand-runner -m unittest discover -s /app/tests -v
+docker run --rm -w /work -v "$PWD:/work:ro" --entrypoint python openmm-protein-ligand-runner -m unittest discover -s tests -v
 ```
+
+## Trajectory analysis and MMPBSA
+
+After a completed run, analysis writes `analysis/diagnostics.png`, `analysis/protein_rmsf.png`, `analysis/metrics.json`, and `analysis/report.html`. The plots cover temperature and energy across NVT/NPT/production, NPT density and box volume, protein-backbone and ligand RMSD, radius of gyration, residue contacts, and protein Cα RMSF. Structural metrics and the prepared MMPBSA trajectory use production frames; every 10th saved frame is loaded by default to limit memory (`--analysis-stride 1` uses all frames). Density and volume are diagnostics, not proof of convergence.
+
+Rebuild the report or run the optional end-state calculation from an existing result:
+
+```bash
+docker run --rm --entrypoint python \
+  -v "$HOME/openmm-protein-ligand-runner-results:/results" \
+  openmm-protein-ligand-runner /app/analyze_run.py --output /results
+
+docker run --rm --entrypoint python \
+  -v "$HOME/openmm-protein-ligand-runner-results:/results" \
+  openmm-protein-ligand-runner /app/analyze_run.py --output /results --mmpbsa \
+  --mmpbsa-model gb --mmpbsa-interval 2
+```
+
+Pass `--mmpbsa` to the simulation command to run single-trajectory MMPBSA after MD. Choose `--mmpbsa-model gb` or `pb`; for a membrane PB slab use `pb_mem` and provide `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0. MMPBSA gives an approximate end-state estimate, not an absolute binding free energy. The OpenMM-to-GROMACS conversion, especially for OpenFF ligands and membrane force fields, needs validation for each system; inspect its log and selections before interpreting results.
+
+GROMACS and AmberTools are included for this optional analysis. `--mmpbsa` cannot be combined with `--skip-gromacs-export`, because MMPBSA needs the exported topology. MMPBSA has been smoke-tested on the AQP3 solution example; the membrane topology conversion still needs separate validation.
