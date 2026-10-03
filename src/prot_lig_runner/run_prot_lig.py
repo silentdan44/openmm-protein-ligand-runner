@@ -24,6 +24,7 @@ from .stability_diagnostics import (
     find_severe_overlaps,
     write_diagnostics,
 )
+from .interchange_compat import enable_batched_openmm_topology_conversion
 
 TEMPERATURE_K = 300.0
 PRESSURE_BAR = 1.0
@@ -642,6 +643,7 @@ def main():
         else:
             # Keep constrained H-X bonds in OpenMM dynamics, but include them
             # in the exported topology so ParmEd can construct Amber radii.
+            enable_batched_openmm_topology_conversion()
             topology_system = forcefield.createSystem(
                 modeller.topology,
                 nonbondedMethod=app.PME,
