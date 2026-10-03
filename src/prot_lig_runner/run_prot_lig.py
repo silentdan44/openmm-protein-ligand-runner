@@ -24,7 +24,10 @@ from .stability_diagnostics import (
     find_severe_overlaps,
     write_diagnostics,
 )
-from .interchange_compat import enable_batched_openmm_topology_conversion
+from .interchange_compat import (
+    enable_batched_openmm_topology_conversion,
+    keep_interchange_molecules_separate,
+)
 
 TEMPERATURE_K = 300.0
 PRESSURE_BAR = 1.0
@@ -346,6 +349,7 @@ def export_mmpbsa_complex(forcefield, modeller, output_dir):
         system=topology_system,
         positions=complex_modeller.positions,
     )
+    keep_interchange_molecules_separate(interchange)
     if complex_modeller.topology.getPeriodicBoxVectors():
         interchange.box = complex_modeller.topology.getPeriodicBoxVectors()
     interchange.to_top(str(output_dir / "mmpbsa_complex.top"))

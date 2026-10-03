@@ -44,3 +44,19 @@ def enable_batched_openmm_topology_conversion(batch_size=4096):
 
     simple_topology_from_graph._batched = True
     interchange_toolkit._simple_topology_from_graph = simple_topology_from_graph
+
+
+def keep_interchange_molecules_separate(interchange):
+    """Skip recursive graph-isomorphism grouping for large protein chains.
+
+    GROMACS can represent repeated chains as separate molecule types. Keeping
+    them separate avoids expensive all-by-all graph matching while preserving
+    each chain's atom and force-field data.
+    """
+    topology = interchange.topology
+    topology._cached_chemically_identical_molecules = {
+        molecule_index: [
+            (molecule_index, {atom_index: atom_index for atom_index in range(molecule.n_atoms)})
+        ]
+        for molecule_index, molecule in enumerate(topology.molecules)
+    }

@@ -1,14 +1,29 @@
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 import openmm as mm
 from openmm import app, unit
 
 from openff.interchange import Interchange
-from prot_lig_runner.interchange_compat import enable_batched_openmm_topology_conversion
+from prot_lig_runner.interchange_compat import (
+    enable_batched_openmm_topology_conversion,
+    keep_interchange_molecules_separate,
+)
 
 
 class InterchangeCompatibilityTests(unittest.TestCase):
+    def test_keeps_large_molecule_types_separate_without_graph_matching(self):
+        topology = SimpleNamespace(molecules=[SimpleNamespace(n_atoms=3), SimpleNamespace(n_atoms=2)])
+        interchange = SimpleNamespace(topology=topology)
+
+        keep_interchange_molecules_separate(interchange)
+
+        self.assertEqual(topology._cached_chemically_identical_molecules, {
+            0: [(0, {0: 0, 1: 1, 2: 2})],
+            1: [(1, {0: 0, 1: 1})],
+        })
+
     def test_batched_openmm_conversion_preserves_disconnected_molecules(self):
         enable_batched_openmm_topology_conversion(batch_size=2)
         topology = app.Topology()
