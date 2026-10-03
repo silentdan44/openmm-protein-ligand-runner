@@ -75,3 +75,10 @@ USER $MAMBA_USER
 
 ENTRYPOINT ["python", "-m", "prot_lig_runner.run_prot_lig"]
 CMD ["--help"]
+
+# Provide a CPU OpenCL implementation for container hosts without GPU passthrough.
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ocl-icd-libopencl1 pocl-opencl-icd && \
+    rm -rf /var/lib/apt/lists/*
+USER $MAMBA_USER
