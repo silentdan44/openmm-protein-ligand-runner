@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 
-from trajectory_analysis import analyze_run
+from .trajectory_analysis import analyze_run
 
 
 def main():

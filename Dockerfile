@@ -66,14 +66,12 @@ RUN mkdir -p /app /work/data/ccd /work/cache /home/data/wwPDB/status /home/data/
       'TMDET_SURF_DIST=0.1' > /app/tmdet.env && \
     chown -R "$MAMBA_USER:$MAMBA_USER" /app/tmdet.env /work /home/data/wwPDB
 
-ENV PATH=/opt/conda/envs/openmm-protein-ligand-runner/bin:$PATH
-COPY --chown=$MAMBA_USER:$MAMBA_USER run_prot_lig.py /app/run_prot_lig.py
-COPY --chown=$MAMBA_USER:$MAMBA_USER stability_diagnostics.py /app/stability_diagnostics.py
-COPY --chown=$MAMBA_USER:$MAMBA_USER validate_trpv4_membrane.py /app/validate_trpv4_membrane.py
-COPY --chown=$MAMBA_USER:$MAMBA_USER trajectory_analysis.py analyze_run.py /app/
+ENV PATH=/opt/conda/envs/openmm-protein-ligand-runner/bin:$PATH \
+    PYTHONPATH=/app/src
+COPY --chown=$MAMBA_USER:$MAMBA_USER src/ /app/src/
 COPY --chown=$MAMBA_USER:$MAMBA_USER input/ /app/input/
 
 USER $MAMBA_USER
 
-ENTRYPOINT ["python", "/app/run_prot_lig.py"]
+ENTRYPOINT ["python", "-m", "prot_lig_runner.run_prot_lig"]
 CMD ["--help"]

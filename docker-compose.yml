@@ -3,7 +3,7 @@ name: openmm-protein-ligand-runner
 services:
   openmm-protein-ligand-runner:
     build: .
-    image: openmm-protein-ligand-runner:local
+    image: openmm-protein-ligand-runner:latest
     command:
       - --receptor
       - /data/aqp3_solution_test_receptor.pdb

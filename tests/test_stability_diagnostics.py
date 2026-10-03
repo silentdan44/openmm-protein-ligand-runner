@@ -5,7 +5,7 @@ import types
 import unittest
 from pathlib import Path
 
-from stability_diagnostics import (
+from prot_lig_runner.stability_diagnostics import (
     StabilityReporter,
     diagnose_failure,
     find_severe_overlaps,

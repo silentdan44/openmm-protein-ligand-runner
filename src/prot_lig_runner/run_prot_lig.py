@@ -18,7 +18,7 @@ from openff.toolkit import Molecule, Topology
 from openff.units.openmm import to_openmm as off_to_omm
 from openmmforcefields.generators import SMIRNOFFTemplateGenerator
 from pdbfixer import PDBFixer
-from stability_diagnostics import (
+from .stability_diagnostics import (
     StabilityReporter,
     diagnose_failure,
     find_severe_overlaps,
@@ -775,7 +775,7 @@ def main():
             simulation.saveState(str(output_dir / "final_state.xml"))
             checkpoint("complete")
             logger.info("Simulation completed at step %d", simulation.currentStep)
-            from trajectory_analysis import analyze_run
+            from .trajectory_analysis import analyze_run
 
             analyze_run(
                 output_dir,

@@ -2,6 +2,17 @@
 
 Docker runner for protein–ligand simulations. `input/` has an AQP3 solution test pair and a TRPV4–capsaicin membrane test pair. The default run is the existing solution workflow; pass `--membrane` to build a membrane, water, and ions together with OpenMM's `Modeller.addMembrane()`.
 
+## Project layout
+
+```text
+src/prot_lig_runner/   Simulation, diagnostics, and analysis package
+tests/                 Unit tests
+input/                 Example receptor and ligand pairs
+Dockerfile             Reproducible runtime image
+environment.yml        Conda runtime dependencies
+docker-compose.yml     Local run configuration
+```
+
 ## Build
 
 ```bash
@@ -61,7 +72,7 @@ To check that a short TRPV4 run completed dynamics and produced a bilayer, water
 docker run --rm --entrypoint python \
   -v "$HOME/openmm-protein-ligand-runner-results:/results:ro" \
   openmm-protein-ligand-runner \
-  /app/validate_trpv4_membrane.py /results
+  -m prot_lig_runner.validate_trpv4_membrane /results
 ```
 
 The validator requires `run_state.json` to report a completed run and checks `membrane_geometry.json`, the final PDB, and non-empty trajectory. It is a structural smoke check, not a substitute for visual inspection or scientific validation.
@@ -77,7 +88,9 @@ The runner warns about possible severe nonbonded atom overlaps in prepared coord
 Run the dependency-light diagnostic checks in the project Docker image:
 
 ```bash
-docker run --rm -w /work -v "$PWD:/work:ro" --entrypoint python openmm-protein-ligand-runner -m unittest discover -s tests -v
+docker run --rm -w /work -e PYTHONPATH=/work/src -v "$PWD:/work:ro" \
+  --entrypoint python openmm-protein-ligand-runner \
+  -m unittest discover -s tests -v
 ```
 
 ## Trajectory analysis and MMPBSA
@@ -89,11 +102,11 @@ Rebuild the report or run the optional end-state calculation from an existing re
 ```bash
 docker run --rm --entrypoint python \
   -v "$HOME/openmm-protein-ligand-runner-results:/results" \
-  openmm-protein-ligand-runner /app/analyze_run.py --output /results
+  openmm-protein-ligand-runner -m prot_lig_runner.analyze_run --output /results
 
 docker run --rm --entrypoint python \
   -v "$HOME/openmm-protein-ligand-runner-results:/results" \
-  openmm-protein-ligand-runner /app/analyze_run.py --output /results --mmpbsa \
+  openmm-protein-ligand-runner -m prot_lig_runner.analyze_run --output /results --mmpbsa \
   --mmpbsa-model gb --mmpbsa-interval 2
 ```
 
