@@ -128,6 +128,8 @@ def parse_args():
         help="Plot Cα distance between two residues; repeat to add pairs, e.g. --distance-pair A:550 A:600",
     )
     args = parser.parse_args()
+    if args.mmpbsa and args.skip_gromacs_export:
+        parser.error("--mmpbsa requires its protein-ligand-only GROMACS topology; remove --skip-gromacs-export")
     if args.membrane:
         if not math.isfinite(args.membrane_center_z_nm):
             parser.error("--membrane-center-z-nm must be finite")
@@ -316,6 +318,38 @@ def add_positional_restraints(system, positions, atom_indices, k):
         force.addParticle(index, positions[index].value_in_unit(u.nanometers))
     system.addForce(force)
     return force
+
+
+def export_mmpbsa_complex(forcefield, modeller, output_dir):
+    """Export a dry protein-ligand topology; solvent and lipids are implicit in MMPBSA."""
+    complex_modeller = app.Modeller(modeller.topology, modeller.positions)
+    discarded = [
+        atom for atom in complex_modeller.topology.atoms()
+        if atom.residue.name not in PROTEIN_RESIDUES and atom.residue.name != "LIG"
+    ]
+    complex_modeller.delete(discarded)
+    if not any(atom.residue.name == "LIG" for atom in complex_modeller.topology.atoms()):
+        raise ValueError("Could not create a protein-ligand-only topology for MMPBSA")
+
+    with (output_dir / "mmpbsa_complex.pdb").open("w") as pdb_file:
+        app.PDBFile.writeFile(complex_modeller.topology, complex_modeller.positions, pdb_file)
+
+    topology_system = forcefield.createSystem(
+        complex_modeller.topology,
+        nonbondedMethod=app.PME,
+        nonbondedCutoff=1.0 * u.nanometer,
+        constraints=None,
+    )
+    enable_batched_openmm_topology_conversion()
+    interchange = Interchange.from_openmm(
+        topology=complex_modeller.topology,
+        system=topology_system,
+        positions=complex_modeller.positions,
+    )
+    if complex_modeller.topology.getPeriodicBoxVectors():
+        interchange.box = complex_modeller.topology.getPeriodicBoxVectors()
+    interchange.to_top(str(output_dir / "mmpbsa_complex.top"))
+    interchange.to_gro(str(output_dir / "mmpbsa_complex.gro"))
 
 
 def make_barostat(args):
@@ -638,7 +672,10 @@ def main():
         for index, residue in enumerate(modeller.topology.residues()):
             residue.id = str(index + 1)
 
-        if args.skip_gromacs_export:
+        if args.mmpbsa:
+            logger.info("Exporting protein-ligand-only topology for MMPBSA; membrane and solvent stay implicit")
+            export_mmpbsa_complex(forcefield, modeller, output_dir)
+        elif args.skip_gromacs_export:
             logger.info("Skipping GROMACS export as requested")
         else:
             # Keep constrained H-X bonds in OpenMM dynamics, but include them

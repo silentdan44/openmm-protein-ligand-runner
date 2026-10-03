@@ -38,16 +38,28 @@ class TrajectoryAnalysisTests(unittest.TestCase):
             root = Path(directory)
             analysis = root / "analysis"
             analysis.mkdir()
-            for path in (root / "system.top", root / "system_final.pdb",
-                         analysis / "trajectory_fitted.xtc", analysis / "index.ndx"):
+            for path in (root / "mmpbsa_complex.top", root / "mmpbsa_complex.pdb",
+                         root / "system_final.pdb", analysis / "trajectory_fitted.xtc"):
                 path.write_text("input")
-            topology = MagicMock()
-            topology.select.return_value = [0, 1]
-            sliced = MagicMock()
-            sliced.save_pdb.side_effect = lambda path: Path(path).write_text("reference")
+            full_topology = MagicMock()
+            full_topology.select.return_value = [0, 1]
+            complex_topology = MagicMock()
+            complex_topology.n_atoms = 2
+            complex_topology.select.side_effect = [[0], [1]]
+            complex_chunk = MagicMock()
+            complex_chunk.xyz = "coordinates"
+            complex_chunk.time = [0.0]
+            complex_chunk.unitcell_vectors = "box"
+            complex_chunk.n_frames = 1
+            chunk = MagicMock()
+            chunk.atom_slice.return_value = complex_chunk
+            writer = MagicMock()
+            writer_context = MagicMock()
+            writer_context.__enter__.return_value = writer
             md = SimpleNamespace(
-                load_topology=MagicMock(return_value=topology),
-                load_pdb=MagicMock(return_value=SimpleNamespace(atom_slice=MagicMock(return_value=sliced))),
+                load_topology=MagicMock(side_effect=[full_topology, complex_topology]),
+                iterload=MagicMock(return_value=iter([chunk])),
+                formats=SimpleNamespace(XTCTrajectoryFile=MagicMock(return_value=writer_context)),
             )
             with patch("prot_lig_runner.trajectory_analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
                 with patch("prot_lig_runner.trajectory_analysis.subprocess.run") as run:
@@ -60,9 +72,13 @@ class TrajectoryAnalysisTests(unittest.TestCase):
             self.assertIn("igb=5", input_text)
             command = run.call_args.args[0]
             self.assertIn("-cp", command)
+            self.assertEqual(command[command.index("-cp") + 1], str(root / "mmpbsa_complex.top"))
             self.assertIn("-ct", command)
             self.assertNotEqual(command[command.index("-cs") + 1],
                                 command[command.index("-cr") + 1])
+            self.assertEqual(Path(command[command.index("-cr") + 1]).read_text(), "input")
+            self.assertEqual(command[command.index("-ct") + 1],
+                             str(analysis / "mmpbsa" / "complex.xtc"))
             self.assertEqual(command[command.index("-cg") + 1:command.index("-cg") + 3],
                              ["Protein", "LIG"])
 
@@ -71,8 +87,8 @@ class TrajectoryAnalysisTests(unittest.TestCase):
             root = Path(directory)
             analysis = root / "analysis"
             analysis.mkdir()
-            for path in (root / "system.top", root / "system_final.pdb",
-                         analysis / "trajectory_fitted.xtc", analysis / "index.ndx"):
+            for path in (root / "mmpbsa_complex.top", root / "mmpbsa_complex.pdb",
+                         root / "system_final.pdb", analysis / "trajectory_fitted.xtc"):
                 path.write_text("input")
             with patch("prot_lig_runner.trajectory_analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
                 with self.assertRaisesRegex(ValueError, "membrane thickness"):

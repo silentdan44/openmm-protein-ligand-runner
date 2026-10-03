@@ -124,8 +124,10 @@ docker run --rm --entrypoint python \
   --mmpbsa-model gb --mmpbsa-interval 2
 ```
 
-Pass `--mmpbsa` to the simulation command to run single-trajectory MMPBSA after MD. Choose `--mmpbsa-model gb` or `pb`; for a membrane PB slab use `pb_mem` and provide `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0. MMPBSA gives an approximate end-state estimate, not an absolute binding free energy. The OpenMM-to-GROMACS conversion, especially for OpenFF ligands and membrane force fields, needs validation for each system; inspect its log and selections before interpreting results.
+Pass `--mmpbsa` to the simulation command to run single-trajectory MMPBSA after MD. Choose `--mmpbsa-model gb` or `pb`; for a membrane PB slab use `pb_mem` and provide `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0. MMPBSA gives an approximate end-state estimate, not an absolute binding free energy.
+
+The MD trajectory contains the full protein, ligand, membrane, water, and ions. MMPBSA uses a separate protein-ligand-only topology and streams those atoms from the fitted trajectory; water and lipids are represented by the selected implicit GB/PB model. This keeps the MMPBSA topology small while retaining the full membrane environment during dynamics. A membrane run writes `mmpbsa_complex.pdb`, `.top`, and `.gro`; `analysis/mmpbsa/complex.xtc` contains the extracted production frames used by gmx_MMPBSA.
 
 When MMPBSA frame results are available, the report plots energy terms by analyzed frame and their mean ± frame standard deviation. Add `--mmpbsa-decomposition` with `--mmpbsa` to calculate and plot the largest per-residue contributions; decomposition takes additional computation. Frame variation is descriptive because neighboring frames are correlated, and does not replace independent replicas.
 
-GROMACS and AmberTools are included for this optional analysis. `--mmpbsa` cannot be combined with `--skip-gromacs-export`, because MMPBSA needs the exported topology. MMPBSA has been smoke-tested on the AQP3 solution example; the membrane topology conversion still needs separate validation.
+GROMACS and AmberTools are included for this optional analysis. `--mmpbsa` cannot be combined with `--skip-gromacs-export`. For older results that lack `mmpbsa_complex.*`, post-run analysis can use the full GROMACS topology and trajectory when those files are present.

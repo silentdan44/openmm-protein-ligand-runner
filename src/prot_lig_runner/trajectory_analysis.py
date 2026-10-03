@@ -62,8 +62,16 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1,
     if executable is None:
         raise RuntimeError("gmx_MMPBSA is not installed or is not available on PATH")
     output_dir, analysis_dir = Path(output_dir), Path(analysis_dir)
-    required = [output_dir / "system.top", output_dir / "system_final.pdb",
-                analysis_dir / "trajectory_fitted.xtc", analysis_dir / "index.ndx"]
+    complex_pdb = output_dir / "mmpbsa_complex.pdb"
+    complex_top = output_dir / "mmpbsa_complex.top"
+    complex_only = complex_pdb.is_file() and complex_top.is_file()
+    required = (
+        [complex_top, complex_pdb, output_dir / "system_final.pdb",
+         analysis_dir / "trajectory_fitted.xtc"]
+        if complex_only else
+        [output_dir / "system.top", output_dir / "system_final.pdb",
+         analysis_dir / "trajectory_fitted.xtc", analysis_dir / "index.ndx"]
+    )
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError("Required MMPBSA inputs are missing: " + ", ".join(missing))
@@ -95,20 +103,59 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1,
         + model_namelist + decomposition_namelist
     )
 
-    # gmx_MMPBSA needs a complex-only reference for chain and residue mapping.
     import mdtraj as md
-
     reference_path = mmpbsa_dir / "reference.pdb"
-    reference = md.load_topology(str(output_dir / "system_final.pdb"))
-    reference_atoms = reference.select("protein or resname LIG")
-    if len(reference_atoms) == 0:
-        raise ValueError("Could not select protein and LIG atoms for the MMPBSA reference structure")
-    md.load_pdb(str(output_dir / "system_final.pdb")).atom_slice(reference_atoms).save_pdb(str(reference_path))
+    if complex_only:
+        # The requested GB/PB model treats water and lipids implicitly. Keep
+        # the MMPBSA topology small and stream its atoms from the full MD XTC.
+        full_topology = md.load_topology(str(output_dir / "system_final.pdb"))
+        full_complex_indices = full_topology.select("protein or resname LIG")
+        if len(full_complex_indices) == 0:
+            raise ValueError("Could not select protein and LIG atoms from the simulation topology")
+        complex_topology = md.load_topology(str(complex_pdb))
+        if complex_topology.n_atoms != len(full_complex_indices):
+            raise ValueError(
+                "MMPBSA complex topology does not match protein-ligand atoms in the simulation topology"
+            )
+        index_path = mmpbsa_dir / "index.ndx"
+        write_index_file(
+            index_path,
+            list(complex_topology.select("protein")),
+            list(complex_topology.select("resname LIG")),
+        )
+        complex_trajectory_path = mmpbsa_dir / "complex.xtc"
+        frames_written = 0
+        with md.formats.XTCTrajectoryFile(str(complex_trajectory_path), mode="w") as writer:
+            for chunk in md.iterload(
+                str(analysis_dir / "trajectory_fitted.xtc"),
+                top=str(output_dir / "system_final.pdb"),
+                chunk=10,
+            ):
+                selected = chunk.atom_slice(full_complex_indices)
+                writer.write(selected.xyz, time=selected.time, box=selected.unitcell_vectors)
+                frames_written += selected.n_frames
+        if frames_written == 0:
+            raise ValueError("The trajectory contains no frames for MMPBSA")
+        reference_path.write_text(complex_pdb.read_text())
+        complex_structure = complex_pdb
+        complex_topology_path = complex_top
+        mmpbsa_index = index_path
+        mmpbsa_trajectory = complex_trajectory_path
+    else:
+        full_reference = md.load_topology(str(output_dir / "system_final.pdb"))
+        reference_atoms = full_reference.select("protein or resname LIG")
+        if len(reference_atoms) == 0:
+            raise ValueError("Could not select protein and LIG atoms from the MMPBSA reference structure")
+        md.load_pdb(str(output_dir / "system_final.pdb")).atom_slice(reference_atoms).save_pdb(str(reference_path))
+        complex_structure = output_dir / "system_final.pdb"
+        complex_topology_path = output_dir / "system.top"
+        mmpbsa_index = analysis_dir / "index.ndx"
+        mmpbsa_trajectory = analysis_dir / "trajectory_fitted.xtc"
     command = [
-        executable, "-O", "-i", str(input_path), "-cs", str(output_dir / "system_final.pdb"),
-        "-cp", str(output_dir / "system.top"), "-cr", str(reference_path),
-        "-ci", str(analysis_dir / "index.ndx"), "-cg", "Protein", "LIG",
-        "-ct", str(analysis_dir / "trajectory_fitted.xtc"), "-o", str(mmpbsa_dir / "FINAL_RESULTS_MMPBSA.dat"),
+        executable, "-O", "-i", str(input_path), "-cs", str(complex_structure),
+        "-cp", str(complex_topology_path), "-cr", str(reference_path),
+        "-ci", str(mmpbsa_index), "-cg", "Protein", "LIG",
+        "-ct", str(mmpbsa_trajectory), "-o", str(mmpbsa_dir / "FINAL_RESULTS_MMPBSA.dat"),
         "-eo", str(mmpbsa_dir / "FINAL_RESULTS_MMPBSA.csv"), "-nogui",
     ]
     if decomposition:
