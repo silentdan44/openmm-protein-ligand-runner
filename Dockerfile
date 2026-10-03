@@ -68,6 +68,7 @@ RUN mkdir -p /app /work/data/ccd /work/cache /home/data/wwPDB/status /home/data/
 
 ENV PATH=/opt/conda/envs/openmm-protein-ligand-runner/bin:$PATH
 COPY --chown=$MAMBA_USER:$MAMBA_USER run_prot_lig.py /app/run_prot_lig.py
+COPY --chown=$MAMBA_USER:$MAMBA_USER stability_diagnostics.py /app/stability_diagnostics.py
 COPY --chown=$MAMBA_USER:$MAMBA_USER validate_trpv4_membrane.py /app/validate_trpv4_membrane.py
 COPY --chown=$MAMBA_USER:$MAMBA_USER trajectory_analysis.py analyze_run.py /app/
 COPY --chown=$MAMBA_USER:$MAMBA_USER input/ /app/input/
