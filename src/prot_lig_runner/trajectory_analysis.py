@@ -62,6 +62,24 @@ def _column(rows, fragment):
     return [row.get(key, math.nan) for row in rows] if key else []
 
 
+def _save_timeseries_plot(output_dir, filename, title, ylabel, time_ns, values, *, target=None):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(10, 4.5), constrained_layout=True)
+    ax.plot(time_ns, values, color="#2563eb", linewidth=1.1)
+    if target is not None:
+        ax.axhline(target, color="#dc2626", linestyle="--", linewidth=1,
+                   label=f"Target {target:g}")
+        ax.legend(frameon=False)
+    ax.set(title=title, xlabel="Time (ns)", ylabel=ylabel)
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.savefig(Path(output_dir) / filename, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _make_plots(output_dir, state_rows, metrics, trajectory_data, config):
     import matplotlib
 
@@ -91,6 +109,8 @@ def _make_plots(output_dir, state_rows, metrics, trajectory_data, config):
         temperature = _column(state_rows, "Temperature")
         if temperature:
             axes[0, 0].plot(time_ns, temperature, color="#2563eb", linewidth=1.2)
+            _save_timeseries_plot(output_dir, "temperature.png", "Temperature", "Temperature (K)",
+                                  time_ns, temperature, target=config["temperature_k"])
         axes[0, 0].axhline(config["temperature_k"], color="#dc2626", linestyle="--",
                            label=f"Target {config['temperature_k']:g} K")
         axes[0, 0].set(title="Thermostat · temperature", xlabel="Time (ns)", ylabel="Temperature (K)")
@@ -107,10 +127,14 @@ def _make_plots(output_dir, state_rows, metrics, trajectory_data, config):
         if density:
             axes[0, 1].plot(time_ns[npt_mask], np.asarray(density)[npt_mask],
                             color="#059669", linewidth=1.2, label="Density (g/mL)")
+            _save_timeseries_plot(output_dir, "npt_density.png", "NPT density", "Density (g/mL)",
+                                  time_ns[npt_mask], np.asarray(density)[npt_mask])
         ax_volume = axes[0, 1].twinx()
         if volume:
             ax_volume.plot(time_ns[npt_mask], np.asarray(volume)[npt_mask],
                            color="#7c3aed", linewidth=1.0, alpha=0.8, label="Volume (nm³)")
+            _save_timeseries_plot(output_dir, "npt_box_volume.png", "NPT box volume", "Volume (nm³)",
+                                  time_ns[npt_mask], np.asarray(volume)[npt_mask])
         axes[0, 1].set(title=f"Barostat · NPT (target {config['pressure_bar']:g} bar)",
                        xlabel="Time (ns)", ylabel="Density (g/mL)")
         ax_volume.set_ylabel("Volume (nm³)")
@@ -126,6 +150,8 @@ def _make_plots(output_dir, state_rows, metrics, trajectory_data, config):
             if values:
                 axes[1, 0].plot(time_ns, values, label=fragment.replace(" Energy", ""),
                                 color=color, linewidth=0.9, alpha=0.85)
+                name = fragment.lower().replace(" ", "_") + ".png"
+                _save_timeseries_plot(output_dir, name, fragment, "Energy (kJ/mol)", time_ns, values)
         axes[1, 0].set(title="Energy", xlabel="Time (ns)", ylabel="Energy (kJ/mol)")
         axes[1, 0].legend(frameon=False)
     else:
@@ -172,6 +198,18 @@ def _make_plots(output_dir, state_rows, metrics, trajectory_data, config):
         ax.spines[["top", "right"]].set_visible(False)
         fig.savefig(output_dir / "protein_rmsf.png", dpi=220, bbox_inches="tight")
         plt.close(fig)
+
+    if trajectory_data:
+        time_ns = trajectory_data["time_ns"]
+        for key, filename, title, ylabel in (
+            ("protein_rmsd_nm", "protein_backbone_rmsd.png", "Protein backbone RMSD", "RMSD (nm)"),
+            ("ligand_rmsd_nm", "ligand_rmsd.png", "Ligand RMSD after protein alignment", "RMSD (nm)"),
+            ("protein_rg_nm", "protein_radius_of_gyration.png", "Protein radius of gyration", "Rg (nm)"),
+            ("ligand_rg_nm", "ligand_radius_of_gyration.png", "Ligand radius of gyration", "Rg (nm)"),
+            ("ligand_contacts", "ligand_protein_contacts.png", "Ligand–protein residue contacts (< 0.45 nm)",
+             "Residue contacts"),
+        ):
+            _save_timeseries_plot(output_dir, filename, title, ylabel, time_ns, trajectory_data[key])
 
 
 def _trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, analysis_stride=10):
@@ -370,11 +408,12 @@ def analyze_run(output_dir, config, *, perform_mmpbsa=False, mmpbsa_model="gb",
             membrane_dielectric=mmpbsa_membrane_dielectric,
         )
 
-    image_names = ["diagnostics.png"]
-    if (analysis_dir / "protein_rmsf.png").exists():
-        image_names.append("protein_rmsf.png")
-    links = "\n".join(f'<p><img src="{name}" alt="{html.escape(name)}" style="max-width:100%"></p>'
-                       for name in image_names)
+    image_names = sorted(path.name for path in analysis_dir.glob("*.png"))
+    links = "\n".join(
+        f'<section><h2>{html.escape(Path(name).stem.replace("_", " ").title())}</h2>'
+        f'<p><img src="{html.escape(name)}" alt="{html.escape(name)}" style="max-width:100%"></p></section>'
+        for name in image_names
+    )
     summary_items = "".join(
         f"<li><strong>{html.escape(key.replace('_', ' '))}:</strong> {value:.3f}</li>"
         for key, value in metrics["trajectory_metrics"].items()

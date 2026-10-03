@@ -96,7 +96,7 @@ docker run --rm -w /work -e PYTHONPATH=/work/src -v "$PWD:/work:ro" \
 
 ## Trajectory analysis and MMPBSA
 
-After a completed run, analysis writes `analysis/diagnostics.png`, `analysis/protein_rmsf.png`, `analysis/metrics.json`, and `analysis/report.html`. The plots cover temperature and energy across NVT/NPT/production, NPT density and box volume, protein-backbone and ligand RMSD, radius of gyration, residue contacts, and protein Cα RMSF. Structural metrics and the prepared MMPBSA trajectory use production frames; every 10th saved frame is loaded by default to limit memory (`--analysis-stride 1` uses all frames). Density and volume are diagnostics, not proof of convergence.
+After a completed run, analysis writes `analysis/metrics.json`, `analysis/report.html`, an overview plot (`diagnostics.png`), and an individual graph for each time-dependent metric currently calculated: temperature; potential, kinetic, and total energy; NPT density and box volume; protein-backbone and ligand RMSD; protein and ligand radius of gyration; ligand–protein residue contacts; and protein Cα RMSF. The HTML report embeds every generated PNG. Structural metrics and the prepared MMPBSA trajectory use production frames; every 10th saved frame is loaded by default to limit memory (`--analysis-stride 1` uses all frames). Density and volume are diagnostics, not proof of convergence.
 
 Rebuild the report or run the optional end-state calculation from an existing result:
 
