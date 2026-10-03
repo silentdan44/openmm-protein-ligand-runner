@@ -96,7 +96,20 @@ docker run --rm -w /work -e PYTHONPATH=/work/src -v "$PWD:/work:ro" \
 
 ## Trajectory analysis and MMPBSA
 
-After a completed run, analysis writes `analysis/metrics.json`, `analysis/report.html`, an overview plot (`diagnostics.png`), and an individual graph for each time-dependent metric currently calculated: temperature; potential, kinetic, and total energy; NPT density and box volume; protein-backbone and ligand RMSD; protein and ligand radius of gyration; ligand–protein residue contacts; and protein Cα RMSF. The HTML report embeds every generated PNG. Structural metrics and the prepared MMPBSA trajectory use production frames; every 10th saved frame is loaded by default to limit memory (`--analysis-stride 1` uses all frames). Density and volume are diagnostics, not proof of convergence.
+After a completed run, analysis writes `analysis/metrics.json`, `analysis/time_series.csv`, available tables of ligand contacts and hydrogen bonds, and `analysis/report.html`. The report contains simulation QC (temperature, potential energy, NPT density and box volume), protein stability (whole-protein and membrane-region RMSD when available, plus Cα RMSF), ligand pose and pocket contacts, contact/hydrogen-bond occupancy, and membrane area per lipid, phosphate-plane thickness, and leaflet counts when a membrane is present. Missing optional data suppresses only its plot and adds a note to the report.
+
+The membrane-region Cα selection is derived from the mean phosphate z-planes in `system_final.pdb`; the report records the planes and selection count. This selects residues geometrically within the bilayer, without hard-coded channel residue numbers. For systems without a membrane, the membrane-specific RMSD and bilayer plots are omitted.
+
+To plot distances between selected residues, repeat `--distance-pair CHAIN:RESID CHAIN:RESID`. Each plotted value is the Cα–Cα distance in nm. Chain IDs and residue numbers refer to `system_final.pdb`; use `_` for a blank chain ID. The flag can be passed to the simulation command or post-run analyzer:
+
+```bash
+docker run --rm --entrypoint python \
+  -v "$HOME/openmm-protein-ligand-runner-results:/results" \
+  openmm-protein-ligand-runner -m prot_lig_runner.analyze_run --output /results \
+  --distance-pair A:550 A:600 --distance-pair A:550 B:600
+```
+
+Structural metrics and the prepared MMPBSA trajectory use production frames; every 10th saved frame is loaded by default to limit memory (`--analysis-stride 1` uses all frames). Density and volume are equilibration diagnostics, not proof of convergence.
 
 Rebuild the report or run the optional end-state calculation from an existing result:
 
@@ -112,5 +125,7 @@ docker run --rm --entrypoint python \
 ```
 
 Pass `--mmpbsa` to the simulation command to run single-trajectory MMPBSA after MD. Choose `--mmpbsa-model gb` or `pb`; for a membrane PB slab use `pb_mem` and provide `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0. MMPBSA gives an approximate end-state estimate, not an absolute binding free energy. The OpenMM-to-GROMACS conversion, especially for OpenFF ligands and membrane force fields, needs validation for each system; inspect its log and selections before interpreting results.
+
+When MMPBSA frame results are available, the report plots energy terms by analyzed frame and their mean ± frame standard deviation. Add `--mmpbsa-decomposition` with `--mmpbsa` to calculate and plot the largest per-residue contributions; decomposition takes additional computation. Frame variation is descriptive because neighboring frames are correlated, and does not replace independent replicas.
 
 GROMACS and AmberTools are included for this optional analysis. `--mmpbsa` cannot be combined with `--skip-gromacs-export`, because MMPBSA needs the exported topology. MMPBSA has been smoke-tested on the AQP3 solution example; the membrane topology conversion still needs separate validation.

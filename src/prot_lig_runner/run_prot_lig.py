@@ -118,6 +118,14 @@ def parse_args():
                         help="Required membrane slab thickness for --mmpbsa-model pb_mem")
     parser.add_argument("--mmpbsa-membrane-dielectric", type=positive_float, default=7.0,
                         help="Membrane dielectric used by the pb_mem model (default: 7)")
+    parser.add_argument(
+        "--mmpbsa-decomposition", action="store_true",
+        help="Also calculate per-residue MMPBSA energy decomposition (more expensive)",
+    )
+    parser.add_argument(
+        "--distance-pair", action="append", nargs=2, metavar=("CHAIN:RESID", "CHAIN:RESID"),
+        help="Plot Cα distance between two residues; repeat to add pairs, e.g. --distance-pair A:550 A:600",
+    )
     args = parser.parse_args()
     if args.membrane:
         if not math.isfinite(args.membrane_center_z_nm):
@@ -390,6 +398,8 @@ def run_configuration(args, receptor, ligand):
         "seed": args.seed,
         "minimize_iterations": args.minimize_iterations,
         "skip_gromacs_export": args.skip_gromacs_export,
+        "distance_pairs": args.distance_pair or [],
+        "mmpbsa_decomposition": args.mmpbsa_decomposition,
         "protein_forcefield": PROTEIN_FF,
         "lipid_forcefield": "amber14/lipid17.xml" if args.membrane else None,
         "water_forcefield": WATER_FF,
@@ -453,6 +463,8 @@ def main():
         raise SystemExit("--mmpbsa-model pb_mem requires --mmpbsa-membrane-thickness-angstrom")
     if args.mmpbsa_model == "pb_mem" and not args.membrane and args.mmpbsa:
         raise SystemExit("--mmpbsa-model pb_mem is only valid with --membrane")
+    if args.mmpbsa_decomposition and not args.mmpbsa:
+        raise SystemExit("--mmpbsa-decomposition requires --mmpbsa")
     if args.mmpbsa and args.skip_gromacs_export:
         raise SystemExit("--mmpbsa requires GROMACS export; remove --skip-gromacs-export")
 
@@ -794,6 +806,8 @@ def main():
                 mmpbsa_membrane_thickness_angstrom=args.mmpbsa_membrane_thickness_angstrom,
                 mmpbsa_membrane_dielectric=args.mmpbsa_membrane_dielectric,
                 analysis_stride=args.analysis_stride,
+                mmpbsa_decomposition=args.mmpbsa_decomposition,
+                distance_pairs=args.distance_pair,
             )
 
     except Exception as error:

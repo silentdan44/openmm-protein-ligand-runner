@@ -1,9 +1,8 @@
-"""Trajectory diagnostics and optional gmx_MMPBSA post-processing."""
+"""Analysis orchestration and optional gmx_MMPBSA post-processing."""
 
 from __future__ import annotations
 
 import csv
-import html
 import json
 import logging
 import math
@@ -11,9 +10,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from .analysis_metrics import trajectory_metrics
+from .analysis_plots import _plot_mmpbsa, _plot_qc, _plot_trajectory, build_report
 
-PHASE_COLORS = {"NVT": "#dbeafe", "NPT": "#dcfce7", "Production": "#fef3c7"}
+logger = logging.getLogger(__name__)
 
 
 def read_state_data(path):
@@ -22,9 +22,8 @@ def read_state_data(path):
     if not path.is_file() or path.stat().st_size == 0:
         return []
     with path.open(newline="") as source:
-        reader = csv.DictReader(source)
         rows = []
-        for row in reader:
+        for row in csv.DictReader(source):
             try:
                 rows.append({key: float(value) if value not in (None, "") else math.nan
                              for key, value in row.items()})
@@ -55,261 +54,14 @@ def write_index_file(path, protein_indices, ligand_indices):
     Path(path).write_text("\n".join(lines))
 
 
-def _column(rows, fragment):
-    if not rows:
-        return []
-    key = next((key for key in rows[0] if fragment.lower() in key.lower()), None)
-    return [row.get(key, math.nan) for row in rows] if key else []
-
-
-def _save_timeseries_plot(output_dir, filename, title, ylabel, time_ns, values, *, target=None):
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(10, 4.5), constrained_layout=True)
-    ax.plot(time_ns, values, color="#2563eb", linewidth=1.1)
-    if target is not None:
-        ax.axhline(target, color="#dc2626", linestyle="--", linewidth=1,
-                   label=f"Target {target:g}")
-        ax.legend(frameon=False)
-    ax.set(title=title, xlabel="Time (ns)", ylabel=ylabel)
-    ax.spines[["top", "right"]].set_visible(False)
-    fig.savefig(Path(output_dir) / filename, dpi=220, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _make_plots(output_dir, state_rows, metrics, trajectory_data, config):
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Patch
-    import numpy as np
-
-    plt.style.use("seaborn-v0_8-whitegrid")
-    fig, axes = plt.subplots(3, 2, figsize=(15, 12), constrained_layout=True)
-    fig.suptitle("Protein–ligand MD diagnostics", fontsize=19, fontweight="bold")
-
-    if state_rows:
-        step = np.asarray(_column(state_rows, "Step"), dtype=float)
-        time_ns = step * float(config["timestep_fs"]) / 1_000_000.0
-        for ax in axes.flat[:3]:
-            for start, end, phase in (
-                (0, config["nvt_steps"], "NVT"),
-                (config["nvt_steps"], config["nvt_steps"] + config["npt_steps"], "NPT"),
-                (config["nvt_steps"] + config["npt_steps"],
-                 config["nvt_steps"] + config["npt_steps"] + config["prod_steps"], "Production"),
-            ):
-                ax.axvspan(start * config["timestep_fs"] / 1_000_000,
-                           end * config["timestep_fs"] / 1_000_000,
-                           color=PHASE_COLORS[phase], alpha=0.30, linewidth=0)
-
-        temperature = _column(state_rows, "Temperature")
-        if temperature:
-            axes[0, 0].plot(time_ns, temperature, color="#2563eb", linewidth=1.2)
-            _save_timeseries_plot(output_dir, "temperature.png", "Temperature", "Temperature (K)",
-                                  time_ns, temperature, target=config["temperature_k"])
-        axes[0, 0].axhline(config["temperature_k"], color="#dc2626", linestyle="--",
-                           label=f"Target {config['temperature_k']:g} K")
-        axes[0, 0].set(title="Thermostat · temperature", xlabel="Time (ns)", ylabel="Temperature (K)")
-        target_handles, target_labels = axes[0, 0].get_legend_handles_labels()
-        phase_handles = [Patch(facecolor=PHASE_COLORS[name], label=name, alpha=0.65)
-                         for name in ("NVT", "NPT", "Production")]
-        axes[0, 0].legend(target_handles + phase_handles,
-                          target_labels + ["NVT", "NPT", "Production"],
-                          frameon=False, ncol=2, fontsize=8)
-
-        density = _column(state_rows, "Density")
-        volume = _column(state_rows, "Box Volume")
-        npt_mask = (step > config["nvt_steps"]) & (step <= config["nvt_steps"] + config["npt_steps"])
-        if density:
-            axes[0, 1].plot(time_ns[npt_mask], np.asarray(density)[npt_mask],
-                            color="#059669", linewidth=1.2, label="Density (g/mL)")
-            _save_timeseries_plot(output_dir, "npt_density.png", "NPT density", "Density (g/mL)",
-                                  time_ns[npt_mask], np.asarray(density)[npt_mask])
-        ax_volume = axes[0, 1].twinx()
-        if volume:
-            ax_volume.plot(time_ns[npt_mask], np.asarray(volume)[npt_mask],
-                           color="#7c3aed", linewidth=1.0, alpha=0.8, label="Volume (nm³)")
-            _save_timeseries_plot(output_dir, "npt_box_volume.png", "NPT box volume", "Volume (nm³)",
-                                  time_ns[npt_mask], np.asarray(volume)[npt_mask])
-        axes[0, 1].set(title=f"Barostat · NPT (target {config['pressure_bar']:g} bar)",
-                       xlabel="Time (ns)", ylabel="Density (g/mL)")
-        ax_volume.set_ylabel("Volume (nm³)")
-        handles, labels = axes[0, 1].get_legend_handles_labels()
-        h2, l2 = ax_volume.get_legend_handles_labels()
-        if handles or h2:
-            axes[0, 1].legend(handles + h2, labels + l2, frameon=False, loc="best")
-
-        for fragment, color in (("Potential Energy", "#2563eb"),
-                                ("Kinetic Energy", "#ea580c"),
-                                ("Total Energy", "#475569")):
-            values = _column(state_rows, fragment)
-            if values:
-                axes[1, 0].plot(time_ns, values, label=fragment.replace(" Energy", ""),
-                                color=color, linewidth=0.9, alpha=0.85)
-                name = fragment.lower().replace(" ", "_") + ".png"
-                _save_timeseries_plot(output_dir, name, fragment, "Energy (kJ/mol)", time_ns, values)
-        axes[1, 0].set(title="Energy", xlabel="Time (ns)", ylabel="Energy (kJ/mol)")
-        axes[1, 0].legend(frameon=False)
-    else:
-        for ax in axes.flat[:3]:
-            ax.text(0.5, 0.5, "No state_data.csv samples", ha="center", va="center",
-                    transform=ax.transAxes)
-
-    if trajectory_data:
-        time_ns = trajectory_data["time_ns"]
-        axes[1, 1].plot(time_ns, trajectory_data["protein_rmsd_nm"],
-                        label="Protein backbone", color="#2563eb", linewidth=1.2)
-        axes[1, 1].plot(time_ns, trajectory_data["ligand_rmsd_nm"],
-                        label="Ligand (protein aligned)", color="#dc2626", linewidth=1.2)
-        axes[1, 1].set(title="RMSD", xlabel="Time (ns)", ylabel="RMSD (nm)")
-        axes[1, 1].legend(frameon=False)
-        axes[2, 0].plot(time_ns, trajectory_data["protein_rg_nm"],
-                        label="Protein", color="#0f766e", linewidth=1.2)
-        axes[2, 0].plot(time_ns, trajectory_data["ligand_rg_nm"],
-                        label="Ligand", color="#9333ea", linewidth=1.2)
-        axes[2, 0].set(title="Radius of gyration", xlabel="Time (ns)", ylabel="Rg (nm)")
-        axes[2, 0].legend(frameon=False)
-        axes[2, 1].plot(time_ns, trajectory_data["ligand_contacts"],
-                        color="#c2410c", linewidth=1.2)
-        axes[2, 1].set(title="Protein–ligand contacts (< 0.45 nm)", xlabel="Time (ns)",
-                       ylabel="Residue contacts")
-    else:
-        for ax in axes.flat[3:]:
-            ax.text(0.5, 0.5, "Trajectory metrics unavailable\n(check trajectory.xtc and system_final.pdb)",
-                    ha="center", va="center", transform=ax.transAxes)
-
-    for ax in axes.flat:
-        ax.spines[["top", "right"]].set_visible(False)
-        ax.tick_params(labelsize=9)
-    fig.savefig(output_dir / "diagnostics.png", dpi=220, bbox_inches="tight")
-    plt.close(fig)
-
-    if trajectory_data and trajectory_data.get("rmsf_residue"):
-        fig, ax = plt.subplots(figsize=(13, 4.5), constrained_layout=True)
-        ax.fill_between(trajectory_data["rmsf_residue"], 0,
-                        trajectory_data["protein_rmsf_nm"], color="#60a5fa", alpha=0.35)
-        ax.plot(trajectory_data["rmsf_residue"], trajectory_data["protein_rmsf_nm"],
-                color="#1d4ed8", linewidth=1.2)
-        ax.set(title="Protein Cα RMSF by residue", xlabel="Residue index", ylabel="RMSF (nm)")
-        ax.spines[["top", "right"]].set_visible(False)
-        fig.savefig(output_dir / "protein_rmsf.png", dpi=220, bbox_inches="tight")
-        plt.close(fig)
-
-    if trajectory_data:
-        time_ns = trajectory_data["time_ns"]
-        for key, filename, title, ylabel in (
-            ("protein_rmsd_nm", "protein_backbone_rmsd.png", "Protein backbone RMSD", "RMSD (nm)"),
-            ("ligand_rmsd_nm", "ligand_rmsd.png", "Ligand RMSD after protein alignment", "RMSD (nm)"),
-            ("protein_rg_nm", "protein_radius_of_gyration.png", "Protein radius of gyration", "Rg (nm)"),
-            ("ligand_rg_nm", "ligand_radius_of_gyration.png", "Ligand radius of gyration", "Rg (nm)"),
-            ("ligand_contacts", "ligand_protein_contacts.png", "Ligand–protein residue contacts (< 0.45 nm)",
-             "Residue contacts"),
-        ):
-            _save_timeseries_plot(output_dir, filename, title, ylabel, time_ns, trajectory_data[key])
-
-
-def _trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, analysis_stride=10):
-    import mdtraj as md
-    import numpy as np
-
-    trajectory = md.load(str(trajectory_path), top=str(topology_path), stride=analysis_stride)
-    production_start_ps = (config["nvt_steps"] + config["npt_steps"]) * config["timestep_fs"] / 1000.0
-    production_frames = trajectory.time >= production_start_ps
-    trajectory = trajectory[production_frames]
-    if trajectory.n_frames == 0:
-        raise ValueError("No production frames were found in trajectory.xtc; increase production length or adjust --xtc-interval")
-
-    # Reconstruct each bonded molecule before fitting; then move the ligand to
-    # its nearest periodic image around the protein for every saved frame.
-    trajectory.make_molecules_whole(inplace=True)
-    protein_atoms = trajectory.topology.select("protein and not element H")
-    protein_ca = trajectory.topology.select("protein and name CA")
-    ligand_atoms = trajectory.topology.select("resname LIG and not element H")
-    ligand_all = trajectory.topology.select("resname LIG")
-    if len(protein_atoms) == 0 or len(protein_ca) == 0 or len(ligand_atoms) == 0:
-        raise ValueError("Could not identify protein heavy atoms, protein Cα atoms, and LIG atoms in system_final.pdb")
-
-    if trajectory.unitcell_vectors is not None:
-        boxes = trajectory.unitcell_vectors
-        for frame in range(trajectory.n_frames):
-            box = boxes[frame]
-            delta = trajectory.xyz[frame, ligand_all].mean(axis=0) - trajectory.xyz[frame, protein_atoms].mean(axis=0)
-            fractional = delta @ np.linalg.inv(box)
-            image_delta = (fractional - np.round(fractional)) @ box
-            trajectory.xyz[frame, ligand_all] += image_delta - delta
-
-    trajectory.superpose(trajectory, 0, atom_indices=protein_ca)
-    reference = trajectory[0]
-    protein_backbone = trajectory.topology.select("protein and backbone")
-    if len(protein_backbone) == 0:
-        protein_backbone = protein_ca
-    # Protein fitting has already been applied. Calculate raw coordinate RMSD
-    # afterwards so the ligand RMSD remains relative to the protein frame.
-    protein_delta = trajectory.xyz[:, protein_backbone] - reference.xyz[0, protein_backbone]
-    ligand_delta = trajectory.xyz[:, ligand_all] - reference.xyz[0, ligand_all]
-    protein_rmsd = np.sqrt(np.mean(np.sum(protein_delta * protein_delta, axis=2), axis=1))
-    ligand_rmsd = np.sqrt(np.mean(np.sum(ligand_delta * ligand_delta, axis=2), axis=1))
-    protein_rg = md.compute_rg(trajectory.atom_slice(protein_atoms))
-    ligand_rg = md.compute_rg(trajectory.atom_slice(ligand_atoms))
-    ca_rmsf = md.rmsf(trajectory, reference, atom_indices=protein_ca)
-    ca_residues = [trajectory.topology.atom(index).residue for index in protein_ca]
-    rmsf_residue, rmsf_values = [], []
-    for residue in ca_residues:
-        rmsf_residue.append(residue.resSeq)
-        rmsf_values.append(float(ca_rmsf[len(rmsf_values)]))
-
-    protein_residues = sorted({atom.residue.index for atom in trajectory.topology.atoms
-                               if atom.residue.is_protein})
-    ligand_residues = sorted({atom.residue.index for atom in trajectory.topology.atoms
-                              if atom.residue.name == "LIG"})
-    residue_pairs = np.asarray([(protein, ligand) for protein in protein_residues
-                                for ligand in ligand_residues], dtype=int)
-    if residue_pairs.size:
-        distances, _ = md.compute_contacts(trajectory, contacts=residue_pairs,
-                                           scheme="closest-heavy", periodic=False)
-        contacts = (distances < 0.45).sum(axis=1)
-    else:
-        contacts = np.zeros(trajectory.n_frames)
-
-    time_ns = trajectory.time / 1000.0
-    cleaned_path = analysis_dir / "trajectory_fitted.xtc"
-    trajectory.save_xtc(str(cleaned_path))
-    return {
-        "time_ns": time_ns,
-        "protein_rmsd_nm": protein_rmsd,
-        "ligand_rmsd_nm": ligand_rmsd,
-        "protein_rg_nm": protein_rg,
-        "ligand_rg_nm": ligand_rg,
-        "protein_rmsf_nm": rmsf_values,
-        "rmsf_residue": rmsf_residue,
-        "ligand_contacts": contacts,
-        "cleaned_trajectory": cleaned_path,
-        "frame_count": int(trajectory.n_frames),
-        "analysis_stride": int(analysis_stride),
-        "production_start_ns": production_start_ps / 1000.0,
-        "statistics": {
-            "protein_backbone_rmsd_nm_mean": float(np.mean(protein_rmsd)),
-            "protein_backbone_rmsd_nm_std": float(np.std(protein_rmsd)),
-            "ligand_rmsd_nm_mean": float(np.mean(ligand_rmsd)),
-            "protein_rg_nm_mean": float(np.mean(protein_rg)),
-            "ligand_rg_nm_mean": float(np.mean(ligand_rg)),
-            "ligand_contacts_mean": float(np.mean(contacts)),
-        },
-    }
-
-
 def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1,
-               membrane_thickness_angstrom=None, membrane_dielectric=7.0):
-    """Run a single-trajectory gmx_MMPBSA calculation on the fitted trajectory."""
+               membrane_thickness_angstrom=None, membrane_dielectric=7.0,
+               decomposition=False):
+    """Run a single-trajectory gmx_MMPBSA estimate, optionally with decomposition."""
     executable = shutil.which("gmx_MMPBSA")
     if executable is None:
         raise RuntimeError("gmx_MMPBSA is not installed or is not available on PATH")
-    output_dir = Path(output_dir)
-    analysis_dir = Path(analysis_dir)
+    output_dir, analysis_dir = Path(output_dir), Path(analysis_dir)
     required = [output_dir / "system.top", output_dir / "system_final.pdb",
                 analysis_dir / "trajectory_fitted.xtc", analysis_dir / "index.ndx"]
     missing = [str(path) for path in required if not path.is_file()]
@@ -333,17 +85,20 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1,
             + f"mctrdz={center_z_angstrom:g}, mthick={membrane_thickness_angstrom:g}, "
             + "poretype=1, istrng=0.150,\n/\n"
         )
+    decomposition_namelist = (
+        '&decomp\n idecomp=2, dec_verbose=1, print_res="within 4",\n/\n'
+        if decomposition else ""
+    )
     input_path.write_text(
         "Single-trajectory protein-ligand binding free-energy estimate.\n"
         f"&general\n startframe=1, interval={interval}, verbose=1,\n/\n"
-        + model_namelist
+        + model_namelist + decomposition_namelist
     )
-    # gmx_MMPBSA uses -cr for residue/chain mapping, so it must contain just
-    # the analyzed complex, not the solvent and ions present in system_final.
-    # It also rejects duplicate command-line inputs by path.
-    reference_path = mmpbsa_dir / "reference.pdb"
+
+    # gmx_MMPBSA needs a complex-only reference for chain and residue mapping.
     import mdtraj as md
 
+    reference_path = mmpbsa_dir / "reference.pdb"
     reference = md.load_topology(str(output_dir / "system_final.pdb"))
     reference_atoms = reference.select("protein or resname LIG")
     if len(reference_atoms) == 0:
@@ -356,6 +111,9 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1,
         "-ct", str(analysis_dir / "trajectory_fitted.xtc"), "-o", str(mmpbsa_dir / "FINAL_RESULTS_MMPBSA.dat"),
         "-eo", str(mmpbsa_dir / "FINAL_RESULTS_MMPBSA.csv"), "-nogui",
     ]
+    if decomposition:
+        command.extend(["-do", str(mmpbsa_dir / "FINAL_DECOMP_MMPBSA.dat"),
+                        "-deo", str(mmpbsa_dir / "FINAL_DECOMP_MMPBSA.csv")])
     (mmpbsa_dir / "command.txt").write_text(" ".join(command) + "\n")
     logger.info("Running gmx_MMPBSA (%s); this may take some time", model)
     with (mmpbsa_dir / "gmx_MMPBSA.log").open("w") as log:
@@ -368,66 +126,93 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1,
 
 def analyze_run(output_dir, config, *, perform_mmpbsa=False, mmpbsa_model="gb",
                 mmpbsa_interval=1, mmpbsa_membrane_thickness_angstrom=None,
-                mmpbsa_membrane_dielectric=7.0, analysis_stride=10):
+                mmpbsa_membrane_dielectric=7.0, mmpbsa_decomposition=False,
+                analysis_stride=10, distance_pairs=None):
     output_dir = Path(output_dir)
     analysis_dir = output_dir / "analysis"
     analysis_dir.mkdir(parents=True, exist_ok=True)
-    rows = read_state_data(output_dir / "state_data.csv")
+    known_plots = {
+        "simulation_qc.png", "protein_stability.png", "protein_rmsf.png", "ligand_pocket.png",
+        "contact_occupancy.png", "hydrogen_bond_occupancy.png", "membrane_integrity.png",
+        "residue_distances.png", "mmpbsa_energy_terms.png", "mmpbsa_energy_summary.png",
+        "mmpbsa_residue_decomposition.png", "diagnostics.png", "temperature.png",
+        "potential_energy.png", "kinetic_energy.png", "total_energy.png", "npt_density.png",
+        "npt_box_volume.png", "protein_backbone_rmsd.png", "ligand_rmsd.png",
+        "protein_radius_of_gyration.png", "ligand_radius_of_gyration.png", "ligand_protein_contacts.png",
+    }
+    for name in known_plots:
+        (analysis_dir / name).unlink(missing_ok=True)
+    for name in ("protein_ligand_contacts.csv", "protein_ligand_hbonds.csv", "residue_distances.csv"):
+        (analysis_dir / name).unlink(missing_ok=True)
+
+    warnings = []
+    state_rows = read_state_data(output_dir / "state_data.csv")
+    trajectory_data = None
     trajectory_path = output_dir / "trajectory.xtc"
     topology_path = output_dir / "system_final.pdb"
-    trajectory_data = None
-    if trajectory_path.is_file() and trajectory_path.stat().st_size:
+    if trajectory_path.is_file() and trajectory_path.stat().st_size and topology_path.is_file():
         try:
-            trajectory_data = _trajectory_metrics(
-                trajectory_path, topology_path, analysis_dir, config, analysis_stride=analysis_stride
+            trajectory_data = trajectory_metrics(
+                trajectory_path, topology_path, analysis_dir, config,
+                analysis_stride=analysis_stride,
+                distance_pairs=distance_pairs if distance_pairs is not None else config.get("distance_pairs"),
             )
         except Exception as error:
             logger.warning("Trajectory metrics unavailable: %s", error)
+            warnings.append(f"Trajectory metrics unavailable: {error}")
+    else:
+        warnings.append("Trajectory metrics skipped: trajectory.xtc or system_final.pdb is missing.")
+
+    generated = []
+    if _plot_qc(analysis_dir, state_rows, config):
+        generated.append("simulation_qc.png")
+    else:
+        warnings.append("Simulation quality-control plot skipped: no usable state_data.csv samples.")
+    generated.extend(_plot_trajectory(analysis_dir, trajectory_data))
+    if trajectory_data and trajectory_data.get("distance_pair_warning"):
+        warnings.append(f"Residue-distance graph skipped: {trajectory_data['distance_pair_warning']}")
+
     metrics = {
         "frame_count": trajectory_data["frame_count"] if trajectory_data else 0,
         "analysis_stride": trajectory_data["analysis_stride"] if trajectory_data else analysis_stride,
         "production_start_ns": trajectory_data["production_start_ns"] if trajectory_data else None,
         "trajectory_metrics": trajectory_data["statistics"] if trajectory_data else {},
-        "state_sample_count": len(rows),
-        "temperature_k": config["temperature_k"],
-        "pressure_bar": config["pressure_bar"],
-        "note": "NPT density and volume are equilibration diagnostics. Instantaneous pressure is not reported by OpenMM StateDataReporter.",
+        "membrane_core_selection": trajectory_data["membrane_core_selection"] if trajectory_data else None,
+        "state_sample_count": len(state_rows),
+        "temperature_k": config.get("temperature_k"),
+        "pressure_bar": config.get("pressure_bar"),
+        "distance_pairs": list(trajectory_data["distance_series"]) if trajectory_data else [],
+        "note": "Frame-to-frame spread is descriptive; correlated frames do not replace independent replicas.",
     }
-    _make_plots(analysis_dir, rows, metrics, trajectory_data, config)
-    (analysis_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
 
     if trajectory_data:
         topology = __import__("mdtraj").load_topology(str(topology_path))
         protein_indices = topology.select("protein")
         ligand_indices = topology.select("resname LIG")
         write_index_file(analysis_dir / "index.ndx", protein_indices.tolist(), ligand_indices.tolist())
+
     if perform_mmpbsa:
-        run_mmpbsa(
+        mmpbsa_dir = run_mmpbsa(
             output_dir, analysis_dir, model=mmpbsa_model, interval=mmpbsa_interval,
             membrane_thickness_angstrom=mmpbsa_membrane_thickness_angstrom,
             membrane_dielectric=mmpbsa_membrane_dielectric,
+            decomposition=mmpbsa_decomposition,
         )
+        mmpbsa_plots = _plot_mmpbsa(
+            analysis_dir, mmpbsa_dir / "FINAL_RESULTS_MMPBSA.csv",
+            mmpbsa_dir / "FINAL_DECOMP_MMPBSA.csv" if mmpbsa_decomposition else None,
+        )
+        generated.extend(mmpbsa_plots)
+        if not mmpbsa_plots:
+            warnings.append("MMPBSA completed, but its CSV contained no supported frame table for plotting.")
+    elif (analysis_dir / "mmpbsa" / "FINAL_RESULTS_MMPBSA.csv").is_file():
+        generated.extend(_plot_mmpbsa(
+            analysis_dir, analysis_dir / "mmpbsa" / "FINAL_RESULTS_MMPBSA.csv",
+            analysis_dir / "mmpbsa" / "FINAL_DECOMP_MMPBSA.csv",
+        ))
+    else:
+        warnings.append("MMPBSA plots skipped: this run has no MMPBSA results.")
 
-    image_names = sorted(path.name for path in analysis_dir.glob("*.png"))
-    links = "\n".join(
-        f'<section><h2>{html.escape(Path(name).stem.replace("_", " ").title())}</h2>'
-        f'<p><img src="{html.escape(name)}" alt="{html.escape(name)}" style="max-width:100%"></p></section>'
-        for name in image_names
-    )
-    summary_items = "".join(
-        f"<li><strong>{html.escape(key.replace('_', ' '))}:</strong> {value:.3f}</li>"
-        for key, value in metrics["trajectory_metrics"].items()
-    )
-    report = "".join((
-        "<!doctype html><meta charset='utf-8'><title>MD diagnostics</title>"
-        "<style>body{font:16px system-ui;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#172033}"
-        "img{border:1px solid #dbe2ea;border-radius:8px}</style>"
-        "<h1>Protein–ligand MD diagnostics</h1>",
-        f"<p>Frames analyzed: {metrics['frame_count']}; state samples: {metrics['state_sample_count']}.</p>",
-        f"<ul>{summary_items}</ul>" if summary_items else "",
-        "<p>Temperature and NPT density/volume are diagnostics, not proof of thermodynamic convergence."
-        " Check independent replicas and production-window stability for quantitative conclusions.</p>",
-        links,
-    ))
-    (analysis_dir / "report.html").write_text(report)
+    (analysis_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
+    build_report(analysis_dir, metrics, generated, warnings=warnings)
     return analysis_dir

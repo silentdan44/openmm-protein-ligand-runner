@@ -17,6 +17,11 @@ def main():
     parser.add_argument("--analysis-stride", type=int, default=10)
     parser.add_argument("--mmpbsa-membrane-thickness-angstrom", type=float)
     parser.add_argument("--mmpbsa-membrane-dielectric", type=float, default=7.0)
+    parser.add_argument("--mmpbsa-decomposition", action="store_true",
+                        help="Also calculate per-residue MMPBSA decomposition")
+    parser.add_argument("--distance-pair", action="append", nargs=2,
+                        metavar=("CHAIN:RESID", "CHAIN:RESID"),
+                        help="Plot Cα distance between two residues; repeat to add pairs")
     args = parser.parse_args()
     output_dir = Path(args.output)
     if args.mmpbsa_interval < 1:
@@ -28,6 +33,8 @@ def main():
         or args.mmpbsa_membrane_thickness_angstrom <= 0
     ):
         parser.error("pb_mem requires --mmpbsa-membrane-thickness-angstrom")
+    if args.mmpbsa_decomposition and not args.mmpbsa:
+        parser.error("--mmpbsa-decomposition requires --mmpbsa")
     if args.mmpbsa and args.mmpbsa_model == "pb_mem":
         state = json.loads((output_dir / "run_state.json").read_text()) if (output_dir / "run_state.json").is_file() else {}
         if not state.get("configuration", {}).get("membrane"):
@@ -48,6 +55,8 @@ def main():
         mmpbsa_membrane_thickness_angstrom=args.mmpbsa_membrane_thickness_angstrom,
         mmpbsa_membrane_dielectric=args.mmpbsa_membrane_dielectric,
         analysis_stride=args.analysis_stride,
+        mmpbsa_decomposition=args.mmpbsa_decomposition,
+        distance_pairs=args.distance_pair,
     )
     print(f"Analysis report: {result / 'report.html'}")
 
