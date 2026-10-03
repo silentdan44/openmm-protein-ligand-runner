@@ -10,7 +10,7 @@ from prot_lig_runner.interchange_compat import enable_batched_openmm_topology_co
 
 class InterchangeCompatibilityTests(unittest.TestCase):
     def test_batched_openmm_conversion_preserves_disconnected_molecules(self):
-        enable_batched_openmm_topology_conversion()
+        enable_batched_openmm_topology_conversion(batch_size=2)
         topology = app.Topology()
         chain = topology.addChain("A")
         system = mm.System()

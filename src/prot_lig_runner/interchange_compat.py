@@ -1,7 +1,7 @@
 """Performance compatibility helpers for large OpenMM to Interchange exports."""
 
 
-def enable_batched_openmm_topology_conversion():
+def enable_batched_openmm_topology_conversion(batch_size=4096):
     """Batch molecule insertion to avoid quadratic OpenFF topology invalidation.
 
     OpenFF Interchange 0.4.1 builds one simple molecule per disconnected
@@ -14,6 +14,8 @@ def enable_batched_openmm_topology_conversion():
     from openff.interchange.components import toolkit as interchange_toolkit
     from openff.toolkit import Topology
 
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
     if getattr(interchange_toolkit._simple_topology_from_graph, "_batched", False):
         return
 
@@ -32,8 +34,12 @@ def enable_batched_openmm_topology_conversion():
             molecule = interchange_toolkit._SimpleMolecule._from_subgraph(subgraph)
             expected_first_atom += molecule.n_atoms
             molecules.append(molecule)
+            if len(molecules) >= batch_size:
+                topology.add_molecules(molecules)
+                molecules = []
 
-        topology.add_molecules(molecules)
+        if molecules:
+            topology.add_molecules(molecules)
         return topology
 
     simple_topology_from_graph._batched = True
