@@ -1,13 +1,14 @@
 # OpenMM runner
 
-Docker runner for protein–ligand simulations. `input/` has an AQP3 solution test pair and a TRPV4–capsaicin membrane test pair. The default run is the existing solution workflow; pass `--membrane` to build a membrane, water, and ions together with OpenMM's `Modeller.addMembrane()`.
+Docker runner for protein–ligand simulations. `tests/fixtures/` has an AQP3 solution test pair and a TRPV4–capsaicin membrane test pair. The default run is the existing solution workflow; pass `--membrane` to build a membrane, water, and ions together with OpenMM's `Modeller.addMembrane()`.
 
 ## Project layout
 
 ```text
 src/prot_lig_runner/   Simulation, diagnostics, and analysis package
 tests/                 Unit tests
-input/                 Example receptor and ligand pairs
+tests/fixtures/        Test receptor and ligand structures
+tests/                 Unit tests
 Dockerfile             Reproducible runtime image
 environment.yml        Conda runtime dependencies
 docker-compose.yml     Local run configuration
@@ -28,8 +29,8 @@ mkdir -p "$HOME/openmm-protein-ligand-runner-results"
 docker run --rm \
   -v "$HOME/openmm-protein-ligand-runner-results:/results" \
   openmm-protein-ligand-runner \
-  --receptor /app/input/aqp3_solution_test_receptor.pdb \
-  --ligand /app/input/aqp3_solution_test_ligand.sdf \
+  --receptor /app/tests/fixtures/aqp3_solution_test_receptor.pdb \
+  --ligand /app/tests/fixtures/aqp3_solution_test_ligand.sdf \
   --output /results
 ```
 
@@ -41,8 +42,8 @@ The TmDet mode transforms both the receptor and ligand by the same rigid-body tr
 docker run --rm \
   -v "$HOME/openmm-protein-ligand-runner-results:/results" \
   openmm-protein-ligand-runner \
-  --receptor /app/input/trpv4_membrane_test_receptor.pdb \
-  --ligand /app/input/trpv4_membrane_test_ligand.sdf \
+  --receptor /app/tests/fixtures/trpv4_membrane_test_receptor.pdb \
+  --ligand /app/tests/fixtures/trpv4_membrane_test_ligand.sdf \
   --output /results \
   --membrane --orientation tmdet --lipid-type POPC \
   --membrane-padding-nm 1.0 --ionic-strength-molar 0.15 \

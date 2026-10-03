@@ -69,7 +69,7 @@ RUN mkdir -p /app /work/data/ccd /work/cache /home/data/wwPDB/status /home/data/
 ENV PATH=/opt/conda/envs/openmm-protein-ligand-runner/bin:$PATH \
     PYTHONPATH=/app/src
 COPY --chown=$MAMBA_USER:$MAMBA_USER src/ /app/src/
-COPY --chown=$MAMBA_USER:$MAMBA_USER input/ /app/input/
+COPY --chown=$MAMBA_USER:$MAMBA_USER tests/fixtures/ /app/tests/fixtures/
 
 USER $MAMBA_USER
 

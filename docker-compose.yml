@@ -18,5 +18,5 @@ services:
       - --prod-steps
       - ${PROD_STEPS:-250000000}
     volumes:
-      - ./input:/data:ro
+      - ./tests/fixtures:/data:ro
       - ${RESULTS_DIR:-../openmm-protein-ligand-runner-results}:/results

@@ -58,10 +58,10 @@ def positive_float(value):
 def parse_args():
     parser = argparse.ArgumentParser(description="Run a protein-ligand OpenMM simulation.")
     parser.add_argument(
-        "--receptor", default="input/aqp3_solution_test_receptor.pdb", help="Receptor PDB path"
+        "--receptor", default="tests/fixtures/aqp3_solution_test_receptor.pdb", help="Receptor PDB path"
     )
     parser.add_argument(
-        "--ligand", default="input/aqp3_solution_test_ligand.sdf", help="Single-ligand SDF path"
+        "--ligand", default="tests/fixtures/aqp3_solution_test_ligand.sdf", help="Single-ligand SDF path"
     )
     parser.add_argument("--output", default="output", help="Output directory")
     parser.add_argument("--nvt-steps", type=positive_int, default=250_000)
