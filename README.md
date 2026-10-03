@@ -65,3 +65,17 @@ docker run --rm --entrypoint python \
 ```
 
 The validator requires `run_state.json` to report a completed run and checks `membrane_geometry.json`, the final PDB, and non-empty trajectory. It is a structural smoke check, not a substitute for visual inspection or scientific validation.
+
+The runner validates the input files, requires one ligand with a 3D conformer, and checks all step counts and intervals before simulation. It periodically writes a checkpoint for the active phase (`checkpoint-nvt.chk`, `checkpoint-npt.chk`, or `checkpoint-prod.chk`) and stores the active phase and input/configuration fingerprint in `run_state.json`. To continue an interrupted run, use the same input files and simulation settings, keep the same results directory, and add `--resume`. Checkpoints require the same OpenMM version and platform. The trajectory and CSV continue in append mode after resume; a completed run writes `final_state.xml`.
+
+For Docker Compose, set `RESULTS_DIR` to a host directory outside this project. Its default is `../openmm-protein-ligand-runner-results`.
+
+## Stability diagnostics
+
+The runner warns about possible severe nonbonded atom overlaps in prepared coordinates. During dynamics it checks reported energy and kinetic temperature for non-finite values, extreme temperature, or a large energy jump. If a run fails, `failure_diagnostics.json` records the phase, last step and metrics, likely explanation, suggested next step, original error, and any close atom pairs. These checks identify warning signs; they do not prove the cause. Overlap distances use a conservative covalent-radius threshold, and close pairs should be inspected before changing the structure.
+
+Run the dependency-light diagnostic checks in the project Docker image:
+
+```bash
+docker run --rm --entrypoint python openmm-protein-ligand-runner -m unittest discover -s /app/tests -v
+```

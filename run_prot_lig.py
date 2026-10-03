@@ -18,6 +18,12 @@ from openff.toolkit import Molecule, Topology
 from openff.units.openmm import to_openmm as off_to_omm
 from openmmforcefields.generators import SMIRNOFFTemplateGenerator
 from pdbfixer import PDBFixer
+from stability_diagnostics import (
+    StabilityReporter,
+    diagnose_failure,
+    find_severe_overlaps,
+    write_diagnostics,
+)
 
 TEMPERATURE_K = 300.0
 PRESSURE_BAR = 1.0
@@ -470,6 +476,9 @@ def main():
     platform, platform_properties = get_platform(current_platform)
     logger.info("Using OpenMM platform %s", platform.getName())
 
+    diagnostic_reporter = None
+    current_phase = "preparation"
+    initial_overlaps = []
     try:
         logger.info("Loading ligand from %s", ligand_path)
         ligand = Molecule.from_file(str(ligand_path))
@@ -584,6 +593,13 @@ def main():
             nonbondedCutoff=1.0 * u.nanometer,
             constraints=app.HBonds,
         )
+        initial_overlaps = find_severe_overlaps(modeller.topology, modeller.positions)
+        if initial_overlaps:
+            logger.warning(
+                "Found %d possible severe nonbonded close contacts in prepared coordinates; "
+                "the first pairs are included in failure_diagnostics.json: %s",
+                len(initial_overlaps), json.dumps(initial_overlaps),
+            )
         for index, residue in enumerate(modeller.topology.residues()):
             residue.id = str(index + 1)
 
@@ -652,8 +668,12 @@ def main():
         trajectory_file = output_dir / "trajectory.xtc"
         append_outputs = resume and state_data_file.exists() and state_data_file.stat().st_size > 0
         append_trajectory = resume and trajectory_file.exists() and trajectory_file.stat().st_size > 0
+        diagnostic_reporter = StabilityReporter(
+            args.report_interval, args.temperature_k, system.getNumParticles()
+        )
         simulation.reporters.extend(
             [
+                diagnostic_reporter,
                 app.StateDataReporter(
                     sys.stdout, args.report_interval, step=True, potentialEnergy=True,
                     kineticEnergy=True, density=True, temperature=True, speed=True, separator="\t"
@@ -689,17 +709,21 @@ def main():
         nvt_end = args.nvt_steps
         npt_end = args.nvt_steps + args.npt_steps
         total_end = npt_end + args.prod_steps
+        current_phase = phase
         if phase == "nvt":
+            current_phase = "nvt"
             checkpoint("nvt")
             remaining = max(0, nvt_end - simulation.currentStep)
             logger.info("Running NVT for %d remaining steps", remaining)
             simulation.step(remaining)
             simulation.system.addForce(make_barostat(args))
             simulation.context.reinitialize(preserveState=True)
+            diagnostic_reporter.previous_energy_kj_mol = None
             phase = "npt"
             checkpoint(phase)
 
         if phase == "npt":
+            current_phase = "npt"
             remaining = max(0, npt_end - simulation.currentStep)
             logger.info("Running NPT for %d remaining steps", remaining)
             simulation.step(remaining)
@@ -707,10 +731,12 @@ def main():
                 if isinstance(simulation.system.getForce(force_index), mm.CustomExternalForce):
                     simulation.system.removeForce(force_index)
             simulation.context.reinitialize(preserveState=True)
+            diagnostic_reporter.previous_energy_kj_mol = None
             phase = "prod"
             checkpoint(phase)
 
         if phase == "prod":
+            current_phase = "prod"
             remaining = max(0, total_end - simulation.currentStep)
             logger.info("Running production for %d remaining steps", remaining)
             simulation.step(remaining)
@@ -718,8 +744,26 @@ def main():
             checkpoint("complete")
             logger.info("Simulation completed at step %d", simulation.currentStep)
 
-    except Exception:
+    except Exception as error:
         logger.exception("Simulation failed")
+        metrics = diagnostic_reporter
+        diagnostics = diagnose_failure(
+            error,
+            step=metrics.last_step if metrics else getattr(locals().get("simulation"), "currentStep", None),
+            phase=current_phase,
+            temperature_k=metrics.last_temperature_k if metrics else None,
+            energy_kj_mol=metrics.last_energy_kj_mol if metrics else None,
+            overlaps=initial_overlaps,
+        )
+        try:
+            write_diagnostics(output_dir / "failure_diagnostics.json", diagnostics)
+            logger.error(
+                "Failure diagnosis: %s Suggested action: %s Diagnostics saved to %s",
+                diagnostics["cause"], diagnostics["suggested_action"],
+                output_dir / "failure_diagnostics.json",
+            )
+        except OSError:
+            logger.exception("Could not write failure_diagnostics.json")
         raise
 
 
