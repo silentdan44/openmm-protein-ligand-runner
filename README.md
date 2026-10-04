@@ -1,155 +1,112 @@
-# OpenMM runner
+# OpenMM protein–ligand runner
 
-Docker runner for protein–ligand simulations. `tests/fixtures/` has an AQP3 solution test pair and a TRPV4–capsaicin membrane test pair. The default run is the existing solution workflow; pass `--membrane` to build a membrane, water, and ions together with OpenMM's `Modeller.addMembrane()`.
+Dockerized molecular-dynamics workflow for a protein–ligand complex. It can prepare a membrane, water, and ions; run OpenMM dynamics; and produce a trajectory-analysis report with optional MMPBSA results.
 
-## Project layout
+## Reference systems
 
-```text
-src/prot_lig_runner/   Simulation, diagnostics, and analysis package
-tests/fixtures/        Test receptor and ligand structures
-tests/                 Unit tests
-Dockerfile             Reproducible runtime image
-environment.yml        Conda runtime dependencies including optional CUDA support
-docker-compose.yml     Local run configuration
-```
+| Inputs | Use in this repository |
+| --- | --- |
+| AQP3 + ligand | Smaller end-to-end membrane smoke test. AQP3 is a multipass membrane aquaglyceroporin, so use the membrane workflow for a physically representative setup. [UniProt: AQP3](https://www.uniprot.org/uniprotkb/A0A2R8Y2R4/entry) |
+| TRPV4 + capsaicin | Larger channel–ligand reference case for optional, more demanding membrane validation. It is not needed for the quick smoke test. |
 
-## Build
+The short AQP3 command below checks that preparation, membrane construction, dynamics, and analysis run. Its few picoseconds of production are not suitable for scientific conclusions.
 
-```bash
-docker build -t openmm-protein-ligand-runner .
-```
+## Build and compute platform
 
-The image pins the Python simulation dependencies and builds the standalone TmDet 4.0 method from release 4.1.2 for local receptor orientation.
-
-## CPU and NVIDIA GPU runtime
-
-The single image includes the CUDA 12 runtime and OpenMM CUDA platform, so it can be built on a machine without an NVIDIA GPU. The container loads CPU/OpenCL plugins by default and adds CUDA plugins only when NVIDIA GPU passthrough is present. The host needs a supported NVIDIA driver and NVIDIA Container Toolkit to expose a GPU to the container. Without GPU passthrough, `--platform auto` falls back to CPU.
+Build the single image once:
 
 ```bash
 docker build -t openmm-protein-ligand-runner:latest .
 ```
 
-On a host with an NVIDIA GPU, pass it through and let the runner select the working platform:
+The image includes OpenMM's CPU, OpenCL, and CUDA support. It can be built without an NVIDIA GPU. With `--platform auto`, the runner tries CUDA, then OpenCL, then CPU. For CUDA, the host needs a supported NVIDIA driver and NVIDIA Container Toolkit; pass the GPU through with `--gpus all`. Without GPU passthrough, automatic selection falls back to available host platforms.
+
+TmDet runs locally in the container. It downloads the wwPDB Chemical Component Dictionary to `/work/data/ccd`; allow network access and writable container storage. With `docker run --rm`, this download is repeated for each new container unless that directory is persisted.
+
+## Quick start: AQP3 membrane smoke test
 
 ```bash
-docker run --rm --gpus all \
-  -v "$HOME/openmm-protein-ligand-runner-results:/results" \
+mkdir -p "$HOME/openmm-protein-ligand-results"
+docker run --rm \
+  -v "$HOME/openmm-protein-ligand-results:/results" \
   openmm-protein-ligand-runner:latest \
   --receptor /app/tests/fixtures/aqp3_receptor.pdb \
   --ligand /app/tests/fixtures/aqp3_ligand.sdf \
-  --output /results --platform auto
-```
-
-To require CUDA instead of allowing fallback, pass `--platform CUDA`. On machines without GPU passthrough, run the same image without `--gpus all`; automatic selection will use CPU.
-
-Compose builds and runs the same universal image; to expose a GPU through Compose, add `gpus: all` to the service on a GPU host.
-
-## Solution run
-
-```bash
-mkdir -p "$HOME/openmm-protein-ligand-runner-results"
-docker run --rm \
-  -v "$HOME/openmm-protein-ligand-runner-results:/results" \
-  openmm-protein-ligand-runner \
-  --receptor /app/tests/fixtures/aqp3_receptor.pdb \
-  --ligand /app/tests/fixtures/aqp3_ligand.sdf \
-  --output /results
-```
-
-## Membrane run: TRPV4
-
-The TmDet mode transforms both the receptor and ligand by the same rigid-body transform, preserving the binding pose:
-
-```bash
-docker run --rm \
-  -v "$HOME/openmm-protein-ligand-runner-results:/results" \
-  openmm-protein-ligand-runner \
-  --receptor /app/tests/fixtures/trpv4_receptor.pdb \
-  --ligand /app/tests/fixtures/trpv4_ligand.sdf \
-  --output /results \
+  --output /results --platform auto \
   --membrane --orientation tmdet --lipid-type POPC \
   --membrane-padding-nm 1.0 --ionic-strength-molar 0.15 \
-  --nvt-steps 10 --npt-steps 10 --prod-steps 10 --minimize-iterations 10 \
-  --report-interval 1 --xtc-interval 1 --checkpoint-interval 10 --skip-gromacs-export
+  --nvt-steps 1000 --npt-steps 1000 --prod-steps 2000 \
+  --minimize-iterations 500 --report-interval 200 \
+  --xtc-interval 200 --checkpoint-interval 1000 \
+  --analysis-stride 1 \
+  --distance-pair A:50 A:180 --distance-pair A:60 A:160
 ```
 
-Orientation choices:
+`Modeller.addMembrane()` builds both lipid leaflets and adds water and ions; do not add solvent separately. Membrane mode uses Amber ff14SB, Lipid17, TIP3P, and OpenFF ligand parameters. The first version supports one lipid type per bilayer: `POPC`, `POPE`, `DLPC`, `DLPE`, `DMPC`, `DOPC`, or `DPPC`.
 
-- `--orientation tmdet` runs local TmDet and writes its oriented receptor (`tmdet_oriented.cif`) and annotation to the output directory.
-- `--orientation preoriented` uses coordinates as supplied. The receptor must have the membrane plane in XY and its center at `--membrane-center-z-nm`; the ligand SDF must use the same coordinate frame.
-- `--orientation manual` rotates the supplied membrane normal onto Z and translates the supplied point on the membrane center plane to `(0, 0, membrane-center-z)`. Example: `--orientation manual --manual-membrane-normal 0 0 1 --manual-membrane-center-angstrom 88 88 106`.
+For a larger TRPV4 run, replace the two fixture paths with `trpv4_receptor.pdb` and `trpv4_ligand.sdf`. TRPV4 is much larger and can require substantially more memory and runtime, especially for membrane construction on CPU.
 
-The first version supports one lipid type per bilayer (`POPC`, `POPE`, `DLPC`, `DLPE`, `DMPC`, `DOPC`, or `DPPC`). `Modeller.addMembrane()` creates both leaflets, water, and ions; do not add solvent separately. Membrane mode uses Amber ff14SB, Lipid17, TIP3P, and OpenFF ligand parameters, plus a membrane barostat during NPT.
+## Inputs and membrane orientation
 
-The included TRPV4 ligand coordinates are already in the receptor frame. For other inputs, the SDF must describe the ligand pose in the supplied receptor coordinates; TmDet/manual orientation applies the same rigid transform to both.
+Mount custom receptor and ligand files read-only, then pass their container paths with `--receptor` and `--ligand`. The receptor must be a PDB; the ligand must be one molecule with a 3D conformer in the receptor's coordinate frame.
 
-## Inputs and run controls
+- `--orientation tmdet` runs local TmDet and applies its rigid-body transform to both receptor and ligand, preserving their relative pose.
+- `--orientation preoriented` uses the supplied coordinates. The membrane plane must be XY and its center must match `--membrane-center-z-nm`.
+- `--orientation manual` rotates the supplied membrane normal onto Z and moves a point on the membrane center plane to `(0, 0, membrane-center-z)`. For example: `--orientation manual --manual-membrane-normal 0 0 1 --manual-membrane-center-angstrom 88 88 106`.
 
-Mount custom inputs read-only and pass their container paths with `--receptor` and `--ligand`. Simulation length, reporting intervals, pressure, temperature, timestep, seed, and platform are configurable through the corresponding CLI flags. `--platform auto` probes usable OpenMM contexts in CUDA → OpenCL → CPU order and falls back when a platform cannot initialize; a named platform is checked directly and reports an error if unavailable. The selected platform is used for MD; OpenMM's `Modeller.addMembrane()` chooses its own platform for its internal minimization. For a long run, mount an external results directory and use `--resume` with identical inputs and settings; the runner fingerprints membrane and orientation settings too.
+The runner validates input files and simulation counts before starting. Configure temperature, pressure, timestep, random seed, run lengths, output intervals, and platform with the corresponding CLI flags. `--platform auto` probes usable OpenMM contexts in CUDA → OpenCL → CPU order; a named platform must be available. OpenMM selects the platform used internally by `Modeller.addMembrane()` independently of the MD platform.
 
-The short TRPV4 command above checks software execution and basic membrane construction, not scientific convergence or force-field validation. It skips the optional, expensive GROMACS conversion; omit `--skip-gromacs-export` when `system.top` and `system.gro` are needed. Inspect `system_final.pdb`, `membrane_geometry.json`, and the trajectory to confirm the protein and ligand are embedded as intended before production runs.
+## Results, validation, and restart
 
-To check that a short TRPV4 run completed dynamics and produced a bilayer, water, both lipid leaflets, and an aligned protein–ligand pose, use the repository's validator from Docker after the runner exits successfully:
+The output directory contains `system_final.pdb`, `trajectory.xtc`, `state_data.csv`, `run_state.json`, checkpoints, and `final_state.xml` after completion. Analysis writes `analysis/report.html`, `analysis/metrics.json`, `analysis/time_series.csv`, plots, and available ligand-contact, hydrogen-bond, and residue-distance tables.
+
+The report includes simulation QC, protein stability and RMSF, ligand pose and pocket contacts, contact and hydrogen-bond occupancy, selected Cα–Cα residue distances, and membrane metrics when applicable. Optional metrics are omitted with a note when their data is unavailable.
+
+Residue distances use `--distance-pair CHAIN:RESID CHAIN:RESID`; repeat the flag for more pairs. Chain IDs and residue numbers refer to `system_final.pdb`; use `_` for a blank chain. Example: `--distance-pair A:550 A:600`.
+
+The membrane validator checks a completed run's status, protein, ligand, lipids, water coverage, both leaflets, ligand–protein proximity, and trajectory:
 
 ```bash
 docker run --rm --entrypoint python \
-  -v "$HOME/openmm-protein-ligand-runner-results:/results:ro" \
-  openmm-protein-ligand-runner \
+  -v "$HOME/openmm-protein-ligand-results:/results:ro" \
+  openmm-protein-ligand-runner:latest \
   -m prot_lig_runner.validate_membrane /results
 ```
 
-The validator requires `run_state.json` to report a completed run and checks `membrane_geometry.json`, the final PDB, and non-empty trajectory. It is a structural smoke check, not a substitute for visual inspection or scientific validation.
+This is a structural smoke check. Inspect `system_final.pdb`, `membrane_geometry.json`, and the trajectory before production use; the validator does not establish equilibration or force-field validity.
 
-The runner validates the input files, requires one ligand with a 3D conformer, and checks all step counts and intervals before simulation. It periodically writes a checkpoint for the active phase (`checkpoint-nvt.chk`, `checkpoint-npt.chk`, or `checkpoint-prod.chk`) and stores the active phase and input/configuration fingerprint in `run_state.json`. To continue an interrupted run, use the same input files and simulation settings, keep the same results directory, and add `--resume`. Checkpoints require the same OpenMM version and platform. The trajectory and CSV continue in append mode after resume; a completed run writes `final_state.xml`.
+For long runs, keep the results directory and add `--resume` with identical inputs and settings. The runner stores a configuration fingerprint and periodically writes phase checkpoints. Checkpoints require the same OpenMM version and platform. For Compose, set `RESULTS_DIR` to a host directory outside the project; the default is `../openmm-protein-ligand-runner-results`.
 
-For Docker Compose, set `RESULTS_DIR` to a host directory outside this project. Its default is `../openmm-protein-ligand-runner-results`.
+## MMPBSA
 
-## Stability diagnostics
+Pass `--mmpbsa` during simulation to run single-trajectory gmx_MMPBSA after MD. Do not combine it with `--skip-gromacs-export`; the calculation needs the protein–ligand topology. Add these flags to a production command to analyze the final 20 ns and sample every 10th saved frame:
 
-The runner warns about possible severe nonbonded atom overlaps in prepared coordinates. During dynamics it checks reported energy and kinetic temperature for non-finite values, extreme temperature, or a large energy jump. If a run fails, `failure_diagnostics.json` records the phase, last step and metrics, likely explanation, suggested next step, original error, and any close atom pairs. These checks identify warning signs; they do not prove the cause. Overlap distances use a conservative covalent-radius threshold, and close pairs should be inspected before changing the structure.
+```text
+--mmpbsa --mmpbsa-model gb --mmpbsa-last-ns 20 --mmpbsa-interval 10
+```
 
-Run the dependency-light diagnostic checks in the project Docker image:
+Omit `--mmpbsa-last-ns` to use all production frames. If the requested window exceeds the available trajectory, all available production frames are used and a warning is logged. `--mmpbsa-interval` samples frames for MMPBSA; `--analysis-stride` independently controls frames loaded for trajectory metrics and plots. Choose `gb`, `pb`, or (for a membrane run) `pb_mem`; `pb_mem` also requires `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0.
+
+MMPBSA treats water and lipids implicitly while using the full membrane MD trajectory to extract protein and ligand atoms. Results include `analysis/mmpbsa/FINAL_RESULTS_MMPBSA.dat`, `.csv`, and `gmx_MMPBSA.log`; the HTML report includes MMPBSA plots when results are available. This is an approximate end-state estimate, not an absolute binding free energy. Frame-to-frame variation is descriptive because adjacent frames are correlated; use equilibrated trajectories and independent replicas for scientific interpretation. Per-residue decomposition is optional via `--mmpbsa-decomposition` and costs additional computation.
+
+To rebuild analysis from a completed run, or run MMPBSA when its topology files are present:
 
 ```bash
-docker run --rm -w /work -e PYTHONPATH=/work/src -v "$PWD:/work:ro" \
-  --entrypoint python openmm-protein-ligand-runner \
+docker run --rm --entrypoint python \
+  -v "$HOME/openmm-protein-ligand-results:/results" \
+  openmm-protein-ligand-runner:latest \
+  -m prot_lig_runner.analysis --output /results --mmpbsa
+```
+
+## Diagnostics and tests
+
+On failure, `failure_diagnostics.json` records the phase, last step and metrics, likely explanation, suggested next step, and any close atom pairs. During dynamics, the runner checks energy and kinetic temperature for non-finite values, extreme temperature, or large energy jumps. These checks identify warning signs; they do not prove a cause.
+
+Run the unit tests in Docker:
+
+```bash
+docker run --rm -w /work -e PYTHONPATH=/work/src \
+  -v "$PWD:/work:ro" --entrypoint python \
+  openmm-protein-ligand-runner:latest \
   -m unittest discover -s tests -v
 ```
-
-## Trajectory analysis and MMPBSA
-
-After a completed run, analysis writes `analysis/metrics.json`, `analysis/time_series.csv`, available tables of ligand contacts and hydrogen bonds, and `analysis/report.html`. The report contains simulation QC (temperature, potential energy, NPT density and box volume), protein stability (whole-protein and membrane-region RMSD when available, plus Cα RMSF), ligand pose and pocket contacts, contact/hydrogen-bond occupancy, and membrane area per lipid, phosphate-plane thickness, and leaflet counts when a membrane is present. Missing optional data suppresses only its plot and adds a note to the report.
-
-The membrane-region Cα selection is derived from the mean phosphate z-planes in `system_final.pdb`; the report records the planes and selection count. This selects residues geometrically within the bilayer, without hard-coded channel residue numbers. For systems without a membrane, the membrane-specific RMSD and bilayer plots are omitted.
-
-To plot distances between selected residues, repeat `--distance-pair CHAIN:RESID CHAIN:RESID`. Each plotted value is the Cα–Cα distance in nm. Chain IDs and residue numbers refer to `system_final.pdb`; use `_` for a blank chain ID. The flag can be passed to the simulation command or post-run analyzer:
-
-```bash
-docker run --rm --entrypoint python \
-  -v "$HOME/openmm-protein-ligand-runner-results:/results" \
-  openmm-protein-ligand-runner -m prot_lig_runner.analysis --output /results \
-  --distance-pair A:550 A:600 --distance-pair A:550 B:600
-```
-
-Structural metrics and the prepared MMPBSA trajectory use production frames; every 10th saved frame is loaded by default to limit memory (`--analysis-stride 1` uses all frames). Density and volume are equilibration diagnostics, not proof of convergence.
-
-Rebuild the report or run the optional end-state calculation from an existing result:
-
-```bash
-docker run --rm --entrypoint python \
-  -v "$HOME/openmm-protein-ligand-runner-results:/results" \
-  openmm-protein-ligand-runner -m prot_lig_runner.analysis --output /results
-
-docker run --rm --entrypoint python \
-  -v "$HOME/openmm-protein-ligand-runner-results:/results" \
-  openmm-protein-ligand-runner -m prot_lig_runner.analysis --output /results --mmpbsa \
-  --mmpbsa-model gb --mmpbsa-last-ns 20 --mmpbsa-interval 2
-```
-
-Pass `--mmpbsa` to the simulation command to run single-trajectory MMPBSA after MD. `--mmpbsa-last-ns 20` restricts it to the final 20 ns of production (for example, 80–100 ns of a 100 ns production run); omit the flag to use all production frames. The existing `--mmpbsa-interval 2` then analyzes every second frame in that selected window. If the requested window is longer than the available production trajectory, all available production frames are used and a warning is logged. Choose `--mmpbsa-model gb` or `pb`; for a membrane PB slab use `pb_mem` and provide `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0. MMPBSA gives an approximate end-state estimate, not an absolute binding free energy.
-
-The MD trajectory contains the full protein, ligand, membrane, water, and ions. MMPBSA uses a separate protein-ligand-only topology and streams those atoms from the fitted trajectory; water and lipids are represented by the selected implicit GB/PB model. This keeps the MMPBSA topology small while retaining the full membrane environment during dynamics. A membrane run writes `mmpbsa_complex.pdb`, `.top`, and `.gro`; `analysis/mmpbsa/complex.xtc` contains the extracted production frames used by gmx_MMPBSA.
-
-When MMPBSA frame results are available, the report plots energy terms by analyzed frame and their mean ± frame standard deviation. Add `--mmpbsa-decomposition` with `--mmpbsa` to calculate and plot the largest per-residue contributions; decomposition takes additional computation. Frame variation is descriptive because neighboring frames are correlated, and does not replace independent replicas.
-
-GROMACS and AmberTools are included for this optional analysis. `--mmpbsa` cannot be combined with `--skip-gromacs-export`. For older results that lack `mmpbsa_complex.*`, post-run analysis can use the full GROMACS topology and trajectory when those files are present.
