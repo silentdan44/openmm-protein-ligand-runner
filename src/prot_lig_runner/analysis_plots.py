@@ -44,6 +44,47 @@ def _axis(ax, title, ylabel, xlabel="Time (ns)"):
     ax.spines[["top", "right"]].set_visible(False)
 
 
+def _annotate_statistics(ax, series, labels, unit):
+    """Add compact mean/median/sample-SD summaries to a time-series axis."""
+    import numpy as np
+
+    entries = []
+    for values, label in zip(series, labels):
+        values = np.asarray(values, dtype=float)
+        values = values[np.isfinite(values)]
+        if not len(values):
+            continue
+        std = float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
+        entries.append(
+            f"{label}: mean {np.mean(values):.3g}, median {np.median(values):.3g}, "
+            f"SD {std:.2g} {unit}"
+        )
+    if entries:
+        ax.text(0.01, 0.99, "\n".join(entries), transform=ax.transAxes,
+                ha="left", va="top", fontsize=8,
+                bbox={"boxstyle": "round,pad=0.4", "facecolor": "white",
+                      "edgecolor": "#cbd5e1", "alpha": 0.92})
+
+
+def _plot_distributions(ax, series, labels, *, colors=None, bins="auto"):
+    """Plot overlaid horizontal histograms for comparable measured series."""
+    import numpy as np
+
+    colors = colors or [None] * len(series)
+    for values, label, color in zip(series, labels, colors):
+        values = np.asarray(values, dtype=float)
+        values = values[np.isfinite(values)]
+        if not len(values):
+            continue
+        ax.hist(values, bins=bins, orientation="horizontal", density=True,
+                histtype="step", linewidth=1.5, label=label, color=color)
+    ax.set_xlabel("Density")
+    ax.set_ylabel("")
+    ax.tick_params(axis="y", labelleft=False, left=False)
+    ax.spines[["top", "right", "left"]].set_visible(False)
+    ax.grid(axis="x", alpha=0.2)
+
+
 def _plot_qc(output_dir, state_rows, config):
     if not state_rows:
         return False
@@ -183,11 +224,20 @@ def _plot_trajectory(output_dir, data):
     distances = data.get("distance_series", {})
     if distances:
         def distance_plot(plt):
-            fig, ax = plt.subplots(figsize=(10, 5), constrained_layout=True)
-            for label, values in distances.items():
-                ax.plot(time, values, linewidth=1, label=label)
-            ax.legend(frameon=False, fontsize=8)
+            labels = list(distances)
+            series = [distances[label] for label in labels]
+            fig, (ax, dist_ax) = plt.subplots(
+                1, 2, figsize=(12, 5), sharey=True, constrained_layout=True,
+                gridspec_kw={"width_ratios": [4, 1]},
+            )
+            colors = []
+            for label, values in zip(labels, series):
+                line, = ax.plot(time, values, linewidth=1, label=label)
+                colors.append(line.get_color())
+            ax.legend(frameon=False, fontsize=8, loc="best")
             _axis(ax, "Selected residue-pair Cα distances", "Distance (nm)")
+            _annotate_statistics(ax, series, labels, "nm")
+            _plot_distributions(dist_ax, series, labels, colors=colors)
             return fig
         if _save_optional_plot(output_dir, "residue_distances.png", distance_plot):
             generated.append("residue_distances.png")
@@ -240,12 +290,21 @@ def _plot_mmpbsa(output_dir, mmpbsa_csv, decomposition_csv=None):
     generated = []
 
     def components(plt):
-        fig, ax = plt.subplots(figsize=(11, 5), constrained_layout=True)
+        labels = energy_keys
+        series = [[row[key] for row in rows] for key in labels]
+        fig, (ax, dist_ax) = plt.subplots(
+            1, 2, figsize=(13, 5.5), sharey=True, constrained_layout=True,
+            gridspec_kw={"width_ratios": [4, 1]},
+        )
+        colors = []
         frames = [row[frame_key] for row in rows]
-        for key in energy_keys:
-            ax.plot(frames, [row[key] for row in rows], linewidth=1, label=key)
+        for key, values in zip(labels, series):
+            line, = ax.plot(frames, values, linewidth=1, label=key)
+            colors.append(line.get_color())
         ax.legend(frameon=False, ncol=2)
         _axis(ax, "MMPBSA energy terms by analyzed frame", "Energy (kcal/mol)", "Frame")
+        _annotate_statistics(ax, series, labels, "kcal/mol")
+        _plot_distributions(dist_ax, series, labels, colors=colors)
         return fig
     if _save_optional_plot(output_dir, "mmpbsa_energy_terms.png", components):
         generated.append("mmpbsa_energy_terms.png")
