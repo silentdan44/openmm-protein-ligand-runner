@@ -62,6 +62,24 @@ The output directory contains `system_final.pdb`, `trajectory.xtc`, `state_data.
 
 The report includes simulation QC, protein stability and RMSF, ligand pose and pocket contacts, contact and hydrogen-bond occupancy, selected Cα–Cα residue distances, and membrane metrics when applicable. Optional metrics are omitted with a note when their data is unavailable.
 
+### Plots in the HTML report
+
+| Plot | What it shows | When it is included |
+| --- | --- | --- |
+| Simulation QC | Temperature and potential energy over time; density and box volume during NPT. | When state samples are available. |
+| Protein stability | Whole-protein backbone RMSD; membrane-core Cα RMSD for membrane systems. | When trajectory metrics are available; membrane-core panel only for membrane systems. |
+| Protein RMSF | Per-residue Cα RMSF, with separate traces for protein chains. | When per-residue fluctuations can be calculated. |
+| Ligand pocket | Ligand RMSD after protein alignment, pocket-contact count, and protein–ligand hydrogen-bond count. | When trajectory metrics are available. |
+| Contact occupancy | Up to 20 protein residues ranked by fraction of frames in contact with the ligand. | When ligand contacts are detected. |
+| Hydrogen-bond occupancy | Up to 20 protein–ligand hydrogen bonds ranked by fraction of frames. | When hydrogen bonds are detected. |
+| Membrane integrity | Area per lipid, phosphate-plane separation, and lipid counts in the two leaflets. | For membrane runs with measurable lipid geometry. |
+| Residue distances | Selected Cα–Cα distances over time, with distributions and mean, median, and standard deviation. | For each run with one or more `--distance-pair` options. |
+| MMPBSA energy terms | Per-frame binding-energy components, distributions, and summary statistics. | When MMPBSA results are available. |
+| MMPBSA energy summary | Mean and frame standard deviation for the MMPBSA energy components. | When MMPBSA results are available. |
+| MMPBSA residue decomposition | Largest per-residue energy contributions. | Only when `--mmpbsa-decomposition` was requested and decomposition data are available. |
+
+An [example AQP3 report](examples/aqp3-report/report.html) is included. It shows the membrane metrics, selected residue distances, and MMPBSA plots together.
+
 Residue distances use `--distance-pair CHAIN:RESID CHAIN:RESID`; repeat the flag for more pairs. Chain IDs and residue numbers refer to `system_final.pdb`; use `_` for a blank chain. Example: `--distance-pair A:550 A:600`.
 
 The membrane validator checks a completed run's status, protein, ligand, lipids, water coverage, both leaflets, ligand–protein proximity, and trajectory:
