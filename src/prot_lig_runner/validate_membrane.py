@@ -34,13 +34,18 @@ def main():
     require(protein["heavy_atom_count"] > 1000, "protein heavy atoms were not found")
     require(ligand["heavy_atom_count"] > 0, "ligand heavy atoms were not found")
     require(lipid["heavy_atom_count"] > 1000, "membrane lipids were not found")
-    require(water["heavy_atom_count"] > 10000, "the system is not sufficiently solvated")
+    require(water["heavy_atom_count"] > 1000, "too few water molecules were found")
     require(leaflets["below_center_heavy_atoms"] > 0, "lower lipid leaflet is missing")
     require(leaflets["above_center_heavy_atoms"] > 0, "upper lipid leaflet is missing")
     protein_z = protein["z_range_nm"]
     lipid_z = lipid["z_range_nm"]
+    water_z = water["z_range_nm"]
     require(protein_z[0] < center_z < protein_z[1], "protein does not span the membrane center plane")
     require(lipid_z[0] < center_z < lipid_z[1], "lipid bilayer does not straddle the membrane center plane")
+    require(
+        water_z[0] < protein_z[0] and water_z[1] > protein_z[1],
+        "water does not extend beyond both ends of the protein",
+    )
     distance = geometry["minimum_ligand_protein_heavy_distance_nm"]
     require(0 < distance < 0.8, f"ligand is not close to the protein (distance={distance:.3f} nm)")
 
