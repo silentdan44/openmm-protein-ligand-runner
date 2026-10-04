@@ -54,7 +54,55 @@ def write_index_file(path, protein_indices, ligand_indices):
     Path(path).write_text("\n".join(lines))
 
 
-def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1,
+def _mmpbsa_window_bounds(trajectory_path, topology_path, last_ns):
+    """Return absolute ps bounds for the final requested production window."""
+    import mdtraj as md
+
+    first_time = last_time = None
+    for chunk in md.iterload(str(trajectory_path), top=str(topology_path), chunk=1000):
+        if chunk.n_frames == 0:
+            continue
+        if first_time is None:
+            first_time = float(chunk.time[0])
+        last_time = float(chunk.time[-1])
+    if last_time is None:
+        raise ValueError("The production trajectory contains no frames for MMPBSA")
+    cutoff = last_time - float(last_ns) * 1000.0
+    if cutoff < first_time:
+        logger.warning(
+            "Requested final %.3f ns for MMPBSA, but the available production trajectory is "
+            "only %.3f ns; using all available production frames",
+            last_ns, (last_time - first_time) / 1000.0,
+        )
+        cutoff = first_time
+    return cutoff
+
+
+def _copy_mmpbsa_window(source_path, topology_path, target_path, *, last_ns,
+                        atom_indices=None):
+    """Write a production trajectory window, optionally reduced to selected atoms."""
+    import mdtraj as md
+
+    cutoff = _mmpbsa_window_bounds(source_path, topology_path, last_ns)
+    frames_written = 0
+    with md.formats.XTCTrajectoryFile(str(target_path), mode="w") as writer:
+        for chunk in md.iterload(str(source_path), top=str(topology_path), chunk=1000):
+            if chunk.n_frames == 0:
+                continue
+            selected = chunk[chunk.time >= cutoff]
+            if selected.n_frames == 0:
+                continue
+            if atom_indices is not None:
+                selected = selected.atom_slice(atom_indices)
+            writer.write(selected.xyz, time=selected.time,
+                         box=selected.unitcell_vectors)
+            frames_written += selected.n_frames
+    if frames_written == 0:
+        raise ValueError("No production frames fall inside the requested MMPBSA window")
+    return frames_written
+
+
+def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None,
                membrane_thickness_angstrom=None, membrane_dielectric=7.0,
                decomposition=False):
     """Run a single-trajectory gmx_MMPBSA estimate, optionally with decomposition."""
@@ -80,6 +128,8 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1,
     input_path = mmpbsa_dir / "mmpbsa.in"
     if model not in {"gb", "pb", "pb_mem"}:
         raise ValueError(f"Unsupported MMPBSA model: {model}")
+    if last_ns is not None and (not math.isfinite(float(last_ns)) or float(last_ns) <= 0):
+        raise ValueError("The MMPBSA last-ns window must be a positive finite number")
     model_namelist = "&gb\n igb=5, saltcon=0.150,\n/\n" if model == "gb" else "&pb\n istrng=0.150,\n/\n"
     if model == "pb_mem":
         if membrane_thickness_angstrom is None or membrane_thickness_angstrom <= 0:
@@ -102,12 +152,16 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1,
     )
     input_path.write_text(
         "Single-trajectory protein-ligand binding free-energy estimate.\n"
-        f"&general\n startframe=1, interval={interval}, verbose=1,\n/\n"
+        + (f"Trajectory window: final {float(last_ns):g} ns of production; "
+           "frames outside this window were excluded before applying interval.\n"
+           if last_ns is not None else "Trajectory window: all available production frames.\n")
+        + f"&general\n startframe=1, interval={interval}, verbose=1,\n/\n"
         + model_namelist + decomposition_namelist
     )
 
     import mdtraj as md
     reference_path = mmpbsa_dir / "reference.pdb"
+    source_trajectory = analysis_dir / "trajectory_fitted.xtc"
     if complex_only:
         # The requested GB/PB model treats water and lipids implicitly. Keep
         # the MMPBSA topology small and stream its atoms from the full MD XTC.
@@ -127,18 +181,20 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1,
             list(complex_topology.select("resname LIG")),
         )
         complex_trajectory_path = mmpbsa_dir / "complex.xtc"
-        frames_written = 0
-        with md.formats.XTCTrajectoryFile(str(complex_trajectory_path), mode="w") as writer:
-            for chunk in md.iterload(
-                str(analysis_dir / "trajectory_fitted.xtc"),
-                top=str(output_dir / "system_final.pdb"),
-                chunk=10,
-            ):
-                selected = chunk.atom_slice(full_complex_indices)
-                writer.write(selected.xyz, time=selected.time, box=selected.unitcell_vectors)
-                frames_written += selected.n_frames
-        if frames_written == 0:
-            raise ValueError("The trajectory contains no frames for MMPBSA")
+        if last_ns is not None:
+            _copy_mmpbsa_window(
+                source_trajectory, output_dir / "system_final.pdb", complex_trajectory_path,
+                last_ns=last_ns, atom_indices=full_complex_indices,
+            )
+        else:
+            frames_written = 0
+            with md.formats.XTCTrajectoryFile(str(complex_trajectory_path), mode="w") as writer:
+                for chunk in md.iterload(str(source_trajectory), top=str(output_dir / "system_final.pdb"), chunk=1000):
+                    selected = chunk.atom_slice(full_complex_indices)
+                    writer.write(selected.xyz, time=selected.time, box=selected.unitcell_vectors)
+                    frames_written += selected.n_frames
+            if frames_written == 0:
+                raise ValueError("The trajectory contains no frames for MMPBSA")
         reference_path.write_text(complex_pdb.read_text())
         complex_structure = complex_pdb
         complex_topology_path = complex_top
@@ -153,7 +209,14 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1,
         complex_structure = output_dir / "system_final.pdb"
         complex_topology_path = output_dir / "system.top"
         mmpbsa_index = analysis_dir / "index.ndx"
-        mmpbsa_trajectory = analysis_dir / "trajectory_fitted.xtc"
+        if last_ns is not None:
+            mmpbsa_trajectory = mmpbsa_dir / "production_window.xtc"
+            _copy_mmpbsa_window(
+                source_trajectory, output_dir / "system_final.pdb", mmpbsa_trajectory,
+                last_ns=last_ns,
+            )
+        else:
+            mmpbsa_trajectory = source_trajectory
     command = [
         executable, "-O", "-i", str(input_path), "-cs", str(complex_structure),
         "-cp", str(complex_topology_path), "-cr", str(reference_path),
@@ -175,7 +238,7 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1,
 
 
 def analyze_run(output_dir, config, *, perform_mmpbsa=False, mmpbsa_model="gb",
-                mmpbsa_interval=1, mmpbsa_membrane_thickness_angstrom=None,
+                mmpbsa_interval=1, mmpbsa_last_ns=None, mmpbsa_membrane_thickness_angstrom=None,
                 mmpbsa_membrane_dielectric=7.0, mmpbsa_decomposition=False,
                 analysis_stride=10, distance_pairs=None):
     output_dir = Path(output_dir)
@@ -244,6 +307,7 @@ def analyze_run(output_dir, config, *, perform_mmpbsa=False, mmpbsa_model="gb",
     if perform_mmpbsa:
         mmpbsa_dir = run_mmpbsa(
             output_dir, analysis_dir, model=mmpbsa_model, interval=mmpbsa_interval,
+            last_ns=mmpbsa_last_ns,
             membrane_thickness_angstrom=mmpbsa_membrane_thickness_angstrom,
             membrane_dielectric=mmpbsa_membrane_dielectric,
             decomposition=mmpbsa_decomposition,

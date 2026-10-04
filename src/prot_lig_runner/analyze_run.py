@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import math
 from pathlib import Path
 
 from .trajectory_analysis import analyze_run
@@ -14,6 +15,8 @@ def main():
     parser.add_argument("--mmpbsa", action="store_true", help="Also run gmx_MMPBSA")
     parser.add_argument("--mmpbsa-model", choices=("gb", "pb", "pb_mem"), default="gb")
     parser.add_argument("--mmpbsa-interval", type=int, default=1)
+    parser.add_argument("--mmpbsa-last-ns", type=float,
+                        help="Restrict MMPBSA to the final N ns of production")
     parser.add_argument("--analysis-stride", type=int, default=10)
     parser.add_argument("--mmpbsa-membrane-thickness-angstrom", type=float)
     parser.add_argument("--mmpbsa-membrane-dielectric", type=float, default=7.0)
@@ -26,6 +29,10 @@ def main():
     output_dir = Path(args.output)
     if args.mmpbsa_interval < 1:
         parser.error("--mmpbsa-interval must be a positive integer")
+    if args.mmpbsa_last_ns is not None and (
+        not math.isfinite(args.mmpbsa_last_ns) or args.mmpbsa_last_ns <= 0
+    ):
+        parser.error("--mmpbsa-last-ns must be a positive finite number")
     if args.analysis_stride < 1:
         parser.error("--analysis-stride must be a positive integer")
     if args.mmpbsa and args.mmpbsa_model == "pb_mem" and (
@@ -52,6 +59,7 @@ def main():
     result = analyze_run(
         output_dir, config, perform_mmpbsa=args.mmpbsa,
         mmpbsa_model=args.mmpbsa_model, mmpbsa_interval=args.mmpbsa_interval,
+        mmpbsa_last_ns=args.mmpbsa_last_ns,
         mmpbsa_membrane_thickness_angstrom=args.mmpbsa_membrane_thickness_angstrom,
         mmpbsa_membrane_dielectric=args.mmpbsa_membrane_dielectric,
         analysis_stride=args.analysis_stride,

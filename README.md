@@ -156,10 +156,10 @@ docker run --rm --entrypoint python \
 docker run --rm --entrypoint python \
   -v "$HOME/openmm-protein-ligand-runner-results:/results" \
   openmm-protein-ligand-runner -m prot_lig_runner.analyze_run --output /results --mmpbsa \
-  --mmpbsa-model gb --mmpbsa-interval 2
+  --mmpbsa-model gb --mmpbsa-last-ns 20 --mmpbsa-interval 2
 ```
 
-Pass `--mmpbsa` to the simulation command to run single-trajectory MMPBSA after MD. Choose `--mmpbsa-model gb` or `pb`; for a membrane PB slab use `pb_mem` and provide `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0. MMPBSA gives an approximate end-state estimate, not an absolute binding free energy.
+Pass `--mmpbsa` to the simulation command to run single-trajectory MMPBSA after MD. `--mmpbsa-last-ns 20` restricts it to the final 20 ns of production (for example, 80–100 ns of a 100 ns production run); omit the flag to use all production frames. The existing `--mmpbsa-interval 2` then analyzes every second frame in that selected window. If the requested window is longer than the available production trajectory, all available production frames are used and a warning is logged. Choose `--mmpbsa-model gb` or `pb`; for a membrane PB slab use `pb_mem` and provide `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0. MMPBSA gives an approximate end-state estimate, not an absolute binding free energy.
 
 The MD trajectory contains the full protein, ligand, membrane, water, and ions. MMPBSA uses a separate protein-ligand-only topology and streams those atoms from the fitted trajectory; water and lipids are represented by the selected implicit GB/PB model. This keeps the MMPBSA topology small while retaining the full membrane environment during dynamics. A membrane run writes `mmpbsa_complex.pdb`, `.top`, and `.gro`; `analysis/mmpbsa/complex.xtc` contains the extracted production frames used by gmx_MMPBSA.
 

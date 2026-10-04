@@ -116,6 +116,8 @@ def parse_args():
     )
     parser.add_argument("--mmpbsa-interval", type=positive_int, default=1,
                         help="Analyze every Nth saved frame in gmx_MMPBSA")
+    parser.add_argument("--mmpbsa-last-ns", type=positive_float,
+                        help="Restrict MMPBSA to the final N ns of production")
     parser.add_argument("--analysis-stride", type=positive_int, default=10,
                         help="Load every Nth XTC frame for plots and the prepared MMPBSA trajectory")
     parser.add_argument("--mmpbsa-membrane-thickness-angstrom", type=positive_float,
@@ -846,6 +848,7 @@ def main():
                 perform_mmpbsa=args.mmpbsa,
                 mmpbsa_model=args.mmpbsa_model,
                 mmpbsa_interval=args.mmpbsa_interval,
+                mmpbsa_last_ns=args.mmpbsa_last_ns,
                 mmpbsa_membrane_thickness_angstrom=args.mmpbsa_membrane_thickness_angstrom,
                 mmpbsa_membrane_dielectric=args.mmpbsa_membrane_dielectric,
                 analysis_stride=args.analysis_stride,
