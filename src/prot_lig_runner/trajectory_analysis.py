@@ -91,7 +91,10 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1,
         model_namelist = (
             "&pb\n memopt=1, emem=" + f"{membrane_dielectric:g}" + ", indi=4.0, "
             + f"mctrdz={center_z_angstrom:g}, mthick={membrane_thickness_angstrom:g}, "
-            + "poretype=1, istrng=0.150,\n/\n"
+            + "poretype=1, radiopt=0, istrng=0.150, fillratio=1.25, inp=2, "
+            # Amber membrane PB needs the linear non-focusing periodic solver.
+            + "sasopt=0, solvopt=2, ipb=1, bcopt=10, nfocus=1, linit=1000, "
+            + "eneopt=1, cutfd=7.0, cutnb=99.0, maxarcdot=15000, npbverb=1,\n/\n"
         )
     decomposition_namelist = (
         '&decomp\n idecomp=2, dec_verbose=1, print_res="within 4",\n/\n'

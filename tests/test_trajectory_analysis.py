@@ -94,6 +94,54 @@ class TrajectoryAnalysisTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "membrane thickness"):
                     run_mmpbsa(root, analysis, model="pb_mem")
 
+    def test_pb_mem_requests_compatible_amber_pb_solver(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            analysis = root / "analysis"
+            analysis.mkdir()
+            for path in (root / "mmpbsa_complex.top", root / "mmpbsa_complex.pdb",
+                         root / "system_final.pdb", analysis / "trajectory_fitted.xtc"):
+                path.write_text("input")
+            (root / "run_state.json").write_text(json.dumps({
+                "configuration": {"membrane": True, "membrane_center_z_nm": 0.0}
+            }))
+
+            full_topology = MagicMock()
+            full_topology.select.return_value = [0, 1]
+            complex_topology = MagicMock()
+            complex_topology.n_atoms = 2
+            complex_topology.select.side_effect = [[0], [1]]
+            complex_chunk = MagicMock()
+            complex_chunk.xyz = "coordinates"
+            complex_chunk.time = [0.0]
+            complex_chunk.unitcell_vectors = "box"
+            complex_chunk.n_frames = 1
+            chunk = MagicMock()
+            chunk.atom_slice.return_value = complex_chunk
+            writer_context = MagicMock()
+            writer_context.__enter__.return_value = MagicMock()
+            md = SimpleNamespace(
+                load_topology=MagicMock(side_effect=[full_topology, complex_topology]),
+                iterload=MagicMock(return_value=iter([chunk])),
+                formats=SimpleNamespace(XTCTrajectoryFile=MagicMock(return_value=writer_context)),
+            )
+            with patch("prot_lig_runner.trajectory_analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
+                with patch("prot_lig_runner.trajectory_analysis.subprocess.run") as run:
+                    run.return_value.returncode = 0
+                    with patch.dict("sys.modules", {"mdtraj": md}):
+                        result = run_mmpbsa(
+                            root, analysis, model="pb_mem", membrane_thickness_angstrom=30.0
+                        )
+
+            input_text = (result / "mmpbsa.in").read_text()
+            self.assertIn("memopt=1", input_text)
+            self.assertIn("ipb=1", input_text)
+            self.assertIn("bcopt=10", input_text)
+            self.assertIn("solvopt=2", input_text)
+            self.assertIn("eneopt=1", input_text)
+
 
 if __name__ == "__main__":
     unittest.main()
