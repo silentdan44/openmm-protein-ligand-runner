@@ -1,22 +1,35 @@
 name: openmm-protein-ligand-runner
 
+x-runner: &runner
+  command:
+    - --receptor
+    - /data/aqp3_solution_test_receptor.pdb
+    - --ligand
+    - /data/aqp3_solution_test_ligand.sdf
+    - --output
+    - /results
+    - --nvt-steps
+    - ${NVT_STEPS:-250000}
+    - --npt-steps
+    - ${NPT_STEPS:-500000}
+    - --prod-steps
+    - ${PROD_STEPS:-250000000}
+  volumes:
+    - ./tests/fixtures:/data:ro
+    - ${RESULTS_DIR:-../openmm-protein-ligand-runner-results}:/results
+
 services:
   openmm-protein-ligand-runner:
+    <<: *runner
     build: .
     image: openmm-protein-ligand-runner:latest
-    command:
-      - --receptor
-      - /data/aqp3_solution_test_receptor.pdb
-      - --ligand
-      - /data/aqp3_solution_test_ligand.sdf
-      - --output
-      - /results
-      - --nvt-steps
-      - ${NVT_STEPS:-250000}
-      - --npt-steps
-      - ${NPT_STEPS:-500000}
-      - --prod-steps
-      - ${PROD_STEPS:-250000000}
-    volumes:
-      - ./tests/fixtures:/data:ro
-      - ${RESULTS_DIR:-../openmm-protein-ligand-runner-results}:/results
+
+  openmm-protein-ligand-runner-cuda:
+    <<: *runner
+    profiles: [gpu]
+    build:
+      context: .
+      args:
+        OPENMM_ENV_FILE: environment.cuda.yml
+    image: openmm-protein-ligand-runner:cuda
+    gpus: all

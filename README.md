@@ -11,6 +11,7 @@ tests/fixtures/        Test receptor and ligand structures
 tests/                 Unit tests
 Dockerfile             Reproducible runtime image
 environment.yml        Conda runtime dependencies
+environment.cuda.yml   CUDA runtime dependencies for NVIDIA GPU servers
 docker-compose.yml     Local run configuration
 ```
 
@@ -21,6 +22,40 @@ docker build -t openmm-protein-ligand-runner .
 ```
 
 The image pins the Python simulation dependencies and builds the standalone TmDet 4.0 method from release 4.1.2 for local receptor orientation.
+
+## NVIDIA GPU image
+
+Build the optional CUDA 12 image on an NVIDIA Linux server (or build it for that server's architecture):
+
+```bash
+docker build --build-arg OPENMM_ENV_FILE=environment.cuda.yml \
+  -t openmm-protein-ligand-runner:cuda .
+```
+
+The GPU image uses the same OpenMM version as the CPU image and adds the CUDA runtime. The host needs a supported NVIDIA driver and NVIDIA Container Toolkit configured for Docker. Pass the GPU through and select CUDA explicitly:
+
+```bash
+docker run --rm --gpus all \
+  -v "$HOME/openmm-protein-ligand-runner-results:/results" \
+  openmm-protein-ligand-runner:cuda \
+  --receptor /app/tests/fixtures/aqp3_solution_test_receptor.pdb \
+  --ligand /app/tests/fixtures/aqp3_solution_test_ligand.sdf \
+  --output /results --platform CUDA
+```
+
+Verify that the container can access CUDA before a long run:
+
+```bash
+docker run --rm --gpus all --entrypoint python \
+  openmm-protein-ligand-runner:cuda -m openmm.testInstallation
+```
+
+The Compose GPU service is opt-in so ordinary `docker compose up` continues to use the CPU image:
+
+```bash
+docker compose --profile gpu build openmm-protein-ligand-runner-cuda
+docker compose --profile gpu run --rm openmm-protein-ligand-runner-cuda
+```
 
 ## Solution run
 
