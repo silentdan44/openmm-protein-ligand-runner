@@ -4,6 +4,7 @@ channels:
 dependencies:
   - python=3.11
   - openmm=8.2
+  - cuda-version=12
   - pdbfixer=1.11
   - openff-toolkit=0.16.5
   - openff-interchange=0.4.1

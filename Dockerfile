@@ -37,8 +37,7 @@ RUN mkdir -p /tmp/contrib && \
 RUN ldconfig
 
 WORKDIR /app
-ARG OPENMM_ENV_FILE=environment.yml
-COPY --chown=$MAMBA_USER:$MAMBA_USER ${OPENMM_ENV_FILE} /tmp/environment.yml
+COPY --chown=$MAMBA_USER:$MAMBA_USER environment.yml /tmp/environment.yml
 RUN micromamba create -y -f /tmp/environment.yml && \
     micromamba clean --all --yes
 

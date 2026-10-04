@@ -23,13 +23,3 @@ services:
     <<: *runner
     build: .
     image: openmm-protein-ligand-runner:latest
-
-  openmm-protein-ligand-runner-cuda:
-    <<: *runner
-    profiles: [gpu]
-    build:
-      context: .
-      args:
-        OPENMM_ENV_FILE: environment.cuda.yml
-    image: openmm-protein-ligand-runner:cuda
-    gpus: all

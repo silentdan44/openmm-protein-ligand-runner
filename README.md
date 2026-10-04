@@ -10,8 +10,7 @@ tests/                 Unit tests
 tests/fixtures/        Test receptor and ligand structures
 tests/                 Unit tests
 Dockerfile             Reproducible runtime image
-environment.yml        Conda runtime dependencies
-environment.cuda.yml   CUDA runtime dependencies for NVIDIA GPU servers
+environment.yml        Conda runtime dependencies including optional CUDA support
 docker-compose.yml     Local run configuration
 ```
 
@@ -23,39 +22,28 @@ docker build -t openmm-protein-ligand-runner .
 
 The image pins the Python simulation dependencies and builds the standalone TmDet 4.0 method from release 4.1.2 for local receptor orientation.
 
-## NVIDIA GPU image
+## CPU and NVIDIA GPU runtime
 
-Build the optional CUDA 12 image on an NVIDIA Linux server (or build it for that server's architecture):
+The single image includes the CUDA 12 runtime and OpenMM CUDA platform, so it can be built on a machine without an NVIDIA GPU. The host needs a supported NVIDIA driver and NVIDIA Container Toolkit to expose a GPU to the container. Without GPU passthrough, `--platform auto` falls back to CPU.
 
 ```bash
-docker build --build-arg OPENMM_ENV_FILE=environment.cuda.yml \
-  -t openmm-protein-ligand-runner:cuda .
+docker build -t openmm-protein-ligand-runner:latest .
 ```
 
-The GPU image uses the same OpenMM version as the CPU image and adds the CUDA runtime. The host needs a supported NVIDIA driver and NVIDIA Container Toolkit configured for Docker. Pass the GPU through and select CUDA explicitly:
+On a host with an NVIDIA GPU, pass it through and let the runner select the working platform:
 
 ```bash
 docker run --rm --gpus all \
   -v "$HOME/openmm-protein-ligand-runner-results:/results" \
-  openmm-protein-ligand-runner:cuda \
+  openmm-protein-ligand-runner:latest \
   --receptor /app/tests/fixtures/aqp3_solution_test_receptor.pdb \
   --ligand /app/tests/fixtures/aqp3_solution_test_ligand.sdf \
-  --output /results --platform CUDA
+  --output /results --platform auto
 ```
 
-Verify that the container can access CUDA before a long run:
+To require CUDA instead of allowing fallback, pass `--platform CUDA`. On machines without GPU passthrough, run the same image without `--gpus all`; automatic selection will use CPU.
 
-```bash
-docker run --rm --gpus all --entrypoint python \
-  openmm-protein-ligand-runner:cuda -m openmm.testInstallation
-```
-
-The Compose GPU service is opt-in so ordinary `docker compose up` continues to use the CPU image:
-
-```bash
-docker compose --profile gpu build openmm-protein-ligand-runner-cuda
-docker compose --profile gpu run --rm openmm-protein-ligand-runner-cuda
-```
+Compose builds and runs the same universal image; to expose a GPU through Compose, add `gpus: all` to the service on a GPU host.
 
 ## Solution run
 
