@@ -1,4 +1,4 @@
-"""Performance compatibility helpers for large OpenMM to Interchange exports."""
+"""Topology export helpers for GROMACS and MMPBSA."""
 
 
 def enable_batched_openmm_topology_conversion(batch_size=4096):
@@ -60,3 +60,40 @@ def keep_interchange_molecules_separate(interchange):
         ]
         for molecule_index, molecule in enumerate(topology.molecules)
     }
+
+
+def export_mmpbsa_complex(forcefield, modeller, output_dir, protein_residues):
+    """Export a dry protein-ligand topology; solvent and lipids stay implicit."""
+    import openmm.app as app
+    import openmm.unit as unit
+    from openff.interchange import Interchange
+
+    complex_modeller = app.Modeller(modeller.topology, modeller.positions)
+    discarded = [
+        atom for atom in complex_modeller.topology.atoms()
+        if atom.residue.name not in protein_residues and atom.residue.name != "LIG"
+    ]
+    complex_modeller.delete(discarded)
+    if not any(atom.residue.name == "LIG" for atom in complex_modeller.topology.atoms()):
+        raise ValueError("Could not create a protein-ligand-only topology for MMPBSA")
+
+    with (output_dir / "mmpbsa_complex.pdb").open("w") as pdb_file:
+        app.PDBFile.writeFile(complex_modeller.topology, complex_modeller.positions, pdb_file)
+
+    topology_system = forcefield.createSystem(
+        complex_modeller.topology,
+        nonbondedMethod=app.PME,
+        nonbondedCutoff=1.0 * unit.nanometer,
+        constraints=None,
+    )
+    enable_batched_openmm_topology_conversion()
+    interchange = Interchange.from_openmm(
+        topology=complex_modeller.topology,
+        system=topology_system,
+        positions=complex_modeller.positions,
+    )
+    keep_interchange_molecules_separate(interchange)
+    if complex_modeller.topology.getPeriodicBoxVectors():
+        interchange.box = complex_modeller.topology.getPeriodicBoxVectors()
+    interchange.to_top(str(output_dir / "mmpbsa_complex.top"))
+    interchange.to_gro(str(output_dir / "mmpbsa_complex.gro"))

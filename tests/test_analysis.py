@@ -4,21 +4,14 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from prot_lig_runner.trajectory_analysis import (
-    phase_for_step,
+from prot_lig_runner.analysis import (
     read_state_data,
     run_mmpbsa,
     write_index_file,
 )
 
 
-class TrajectoryAnalysisTests(unittest.TestCase):
-    def test_phase_boundaries(self):
-        self.assertEqual(phase_for_step(250, 250, 500), "NVT")
-        self.assertEqual(phase_for_step(251, 250, 500), "NPT")
-        self.assertEqual(phase_for_step(750, 250, 500), "NPT")
-        self.assertEqual(phase_for_step(751, 250, 500), "Production")
-
+class AnalysisTests(unittest.TestCase):
     def test_reads_reporter_csv(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state_data.csv"
@@ -61,8 +54,8 @@ class TrajectoryAnalysisTests(unittest.TestCase):
                 iterload=MagicMock(return_value=iter([chunk])),
                 formats=SimpleNamespace(XTCTrajectoryFile=MagicMock(return_value=writer_context)),
             )
-            with patch("prot_lig_runner.trajectory_analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
-                with patch("prot_lig_runner.trajectory_analysis.subprocess.run") as run:
+            with patch("prot_lig_runner.analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
+                with patch("prot_lig_runner.analysis.subprocess.run") as run:
                     run.return_value.returncode = 0
                     with patch.dict("sys.modules", {"mdtraj": md}):
                         result = run_mmpbsa(root, analysis, interval=2)
@@ -90,7 +83,7 @@ class TrajectoryAnalysisTests(unittest.TestCase):
             for path in (root / "mmpbsa_complex.top", root / "mmpbsa_complex.pdb",
                          root / "system_final.pdb", analysis / "trajectory_fitted.xtc"):
                 path.write_text("input")
-            with patch("prot_lig_runner.trajectory_analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
+            with patch("prot_lig_runner.analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
                 with self.assertRaisesRegex(ValueError, "membrane thickness"):
                     run_mmpbsa(root, analysis, model="pb_mem")
 
@@ -127,8 +120,8 @@ class TrajectoryAnalysisTests(unittest.TestCase):
                 iterload=MagicMock(return_value=iter([chunk])),
                 formats=SimpleNamespace(XTCTrajectoryFile=MagicMock(return_value=writer_context)),
             )
-            with patch("prot_lig_runner.trajectory_analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
-                with patch("prot_lig_runner.trajectory_analysis.subprocess.run") as run:
+            with patch("prot_lig_runner.analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
+                with patch("prot_lig_runner.analysis.subprocess.run") as run:
                     run.return_value.returncode = 0
                     with patch.dict("sys.modules", {"mdtraj": md}):
                         result = run_mmpbsa(

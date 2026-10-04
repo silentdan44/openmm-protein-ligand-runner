@@ -64,14 +64,23 @@ RUN mkdir -p /app /work/data/ccd /work/cache /home/data/wwPDB/status /home/data/
       'TMDET_SURF_PROBSIZE=1.4' \
       'TMDET_SURF_ZSLICE=0.05' \
       'TMDET_SURF_DIST=0.1' > /app/tmdet.env && \
+    mkdir -p /app/openmm-plugins-cpu /app/openmm-plugins-cuda && \
+    for plugin in /opt/conda/envs/openmm-protein-ligand-runner/lib/plugins/*.so; do \
+      case "$plugin" in \
+        *CUDA*) ln -s "$plugin" /app/openmm-plugins-cuda/ ;; \
+        *) ln -s "$plugin" /app/openmm-plugins-cpu/ ;; \
+      esac; \
+    done && \
     chown -R "$MAMBA_USER:$MAMBA_USER" /app/tmdet.env /work /home/data/wwPDB
 
 ENV PATH=/opt/conda/envs/openmm-protein-ligand-runner/bin:$PATH \
+    OPENMM_PLUGIN_DIR=/app/openmm-plugins-cpu \
+    OPENMM_CUDA_PLUGIN_DIR=/app/openmm-plugins-cuda \
     PYTHONPATH=/app/src
 COPY --chown=$MAMBA_USER:$MAMBA_USER src/ /app/src/
 COPY --chown=$MAMBA_USER:$MAMBA_USER tests/fixtures/ /app/tests/fixtures/
 
 USER $MAMBA_USER
 
-ENTRYPOINT ["python", "-m", "prot_lig_runner.run_prot_lig"]
+ENTRYPOINT ["python", "-m", "prot_lig_runner.simulate"]
 CMD ["--help"]

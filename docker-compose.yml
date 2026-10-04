@@ -3,9 +3,9 @@ name: openmm-protein-ligand-runner
 x-runner: &runner
   command:
     - --receptor
-    - /data/aqp3_solution_test_receptor.pdb
+    - /data/aqp3_receptor.pdb
     - --ligand
-    - /data/aqp3_solution_test_ligand.sdf
+    - /data/aqp3_ligand.sdf
     - --output
     - /results
     - --nvt-steps

@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import random
 import shutil
 import subprocess
@@ -18,14 +19,15 @@ from openff.toolkit import Molecule, Topology
 from openff.units.openmm import to_openmm as off_to_omm
 from openmmforcefields.generators import SMIRNOFFTemplateGenerator
 from pdbfixer import PDBFixer
-from .stability_diagnostics import (
+from .stability import (
     StabilityReporter,
     diagnose_failure,
     find_severe_overlaps,
     write_diagnostics,
 )
-from .interchange_compat import (
+from .topology_export import (
     enable_batched_openmm_topology_conversion,
+    export_mmpbsa_complex,
     keep_interchange_molecules_separate,
 )
 
@@ -62,10 +64,10 @@ def positive_float(value):
 def parse_args():
     parser = argparse.ArgumentParser(description="Run a protein-ligand OpenMM simulation.")
     parser.add_argument(
-        "--receptor", default="tests/fixtures/aqp3_solution_test_receptor.pdb", help="Receptor PDB path"
+        "--receptor", default="tests/fixtures/aqp3_receptor.pdb", help="Receptor PDB path"
     )
     parser.add_argument(
-        "--ligand", default="tests/fixtures/aqp3_solution_test_ligand.sdf", help="Single-ligand SDF path"
+        "--ligand", default="tests/fixtures/aqp3_ligand.sdf", help="Single-ligand SDF path"
     )
     parser.add_argument("--output", default="output", help="Output directory")
     parser.add_argument("--nvt-steps", type=positive_int, default=250_000)
@@ -147,6 +149,10 @@ def parse_args():
                 parser.error("--manual-membrane-normal must be nonzero")
         elif args.manual_membrane_normal is not None or args.manual_membrane_center_angstrom is not None:
             parser.error("manual orientation parameters are only valid with --orientation manual")
+    if args.mmpbsa and args.mmpbsa_model == "pb_mem" and args.mmpbsa_membrane_thickness_angstrom is None:
+        parser.error("--mmpbsa-model pb_mem requires --mmpbsa-membrane-thickness-angstrom")
+    if args.mmpbsa and args.mmpbsa_model == "pb_mem" and not args.membrane:
+        parser.error("--mmpbsa-model pb_mem is only valid with --membrane")
     return args
 
 
@@ -325,39 +331,6 @@ def add_positional_restraints(system, positions, atom_indices, k):
     return force
 
 
-def export_mmpbsa_complex(forcefield, modeller, output_dir):
-    """Export a dry protein-ligand topology; solvent and lipids are implicit in MMPBSA."""
-    complex_modeller = app.Modeller(modeller.topology, modeller.positions)
-    discarded = [
-        atom for atom in complex_modeller.topology.atoms()
-        if atom.residue.name not in PROTEIN_RESIDUES and atom.residue.name != "LIG"
-    ]
-    complex_modeller.delete(discarded)
-    if not any(atom.residue.name == "LIG" for atom in complex_modeller.topology.atoms()):
-        raise ValueError("Could not create a protein-ligand-only topology for MMPBSA")
-
-    with (output_dir / "mmpbsa_complex.pdb").open("w") as pdb_file:
-        app.PDBFile.writeFile(complex_modeller.topology, complex_modeller.positions, pdb_file)
-
-    topology_system = forcefield.createSystem(
-        complex_modeller.topology,
-        nonbondedMethod=app.PME,
-        nonbondedCutoff=1.0 * u.nanometer,
-        constraints=None,
-    )
-    enable_batched_openmm_topology_conversion()
-    interchange = Interchange.from_openmm(
-        topology=complex_modeller.topology,
-        system=topology_system,
-        positions=complex_modeller.positions,
-    )
-    keep_interchange_molecules_separate(interchange)
-    if complex_modeller.topology.getPeriodicBoxVectors():
-        interchange.box = complex_modeller.topology.getPeriodicBoxVectors()
-    interchange.to_top(str(output_dir / "mmpbsa_complex.top"))
-    interchange.to_gro(str(output_dir / "mmpbsa_complex.gro"))
-
-
 def make_barostat(args):
     if args.membrane:
         barostat = mm.MonteCarloMembraneBarostat(
@@ -381,6 +354,15 @@ def make_barostat(args):
 def get_platform(requested):
     candidates = (requested,) if requested != "auto" else ("CUDA", "OpenCL", "CPU")
     failures = []
+    if requested in {"auto", "CUDA"} and Path("/dev/nvidiactl").exists():
+        cuda_plugin_dir = os.environ.get("OPENMM_CUDA_PLUGIN_DIR")
+        if cuda_plugin_dir:
+            try:
+                plugin_errors = mm.Platform.loadPluginsFromDirectory(cuda_plugin_dir)
+                if plugin_errors:
+                    logger.warning("Some OpenMM CUDA plugins failed to load: %s", plugin_errors)
+            except Exception as exc:
+                logger.warning("OpenMM CUDA plugins could not be loaded: %s", exc)
     for name in candidates:
         properties = {"CudaPrecision": "mixed"} if name == "CUDA" else {}
         try:
@@ -415,9 +397,13 @@ def sha256_file(path):
 
 
 def run_configuration(args, receptor, ligand):
+    package_dir = Path(__file__).parent
     return {
         "inputs": {"receptor_sha256": sha256_file(receptor), "ligand_sha256": sha256_file(ligand)},
-        "runner_sha256": sha256_file(Path(__file__)),
+        "source_sha256": {
+            path.name: sha256_file(path)
+            for path in sorted(package_dir.glob("*.py"))
+        },
         "nvt_steps": args.nvt_steps,
         "npt_steps": args.npt_steps,
         "prod_steps": args.prod_steps,
@@ -500,15 +486,6 @@ def main():
             raise SystemExit(f"{label} file does not exist or is not a file: {path}")
     if not math.isfinite(args.ionic_strength_molar) or args.ionic_strength_molar < 0:
         raise SystemExit("--ionic-strength-molar must be a finite number that is zero or greater")
-    if args.mmpbsa_model == "pb_mem" and args.mmpbsa and args.mmpbsa_membrane_thickness_angstrom is None:
-        raise SystemExit("--mmpbsa-model pb_mem requires --mmpbsa-membrane-thickness-angstrom")
-    if args.mmpbsa_model == "pb_mem" and not args.membrane and args.mmpbsa:
-        raise SystemExit("--mmpbsa-model pb_mem is only valid with --membrane")
-    if args.mmpbsa_decomposition and not args.mmpbsa:
-        raise SystemExit("--mmpbsa-decomposition requires --mmpbsa")
-    if args.mmpbsa and args.skip_gromacs_export:
-        raise SystemExit("--mmpbsa requires GROMACS export; remove --skip-gromacs-export")
-
     output_dir.mkdir(parents=True, exist_ok=True)
     resume = args.resume
     progress_path = output_dir / PROGRESS_FILE
@@ -832,7 +809,7 @@ def main():
             simulation.saveState(str(output_dir / "final_state.xml"))
             checkpoint("complete")
             logger.info("Simulation completed at step %d", simulation.currentStep)
-            from .trajectory_analysis import analyze_run
+            from .analysis import analyze_run
 
             analyze_run(
                 output_dir,

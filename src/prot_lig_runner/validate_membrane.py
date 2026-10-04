@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate artifacts produced by the short Docker TRPV4 membrane run."""
+"""Validate the structure and status of a completed membrane run."""
 
 import json
 import sys
@@ -23,7 +23,8 @@ def main():
     geometry = json.loads(geometry_path.read_text())
     progress = json.loads(progress_path.read_text())
     require(progress.get("phase") == "complete", "toy MD did not reach the complete phase")
-    require(progress.get("platform") in {"CUDA", "OpenCL", "CPU"}, "invalid recorded OpenMM platform")
+    require(progress.get("platform") in {"CUDA", "OpenCL", "CPU", "Reference"}, "invalid recorded OpenMM platform")
+    center_z = float(progress.get("configuration", {}).get("membrane_center_z_nm") or 0.0)
 
     protein = geometry["protein"]
     ligand = geometry["ligand"]
@@ -38,8 +39,8 @@ def main():
     require(leaflets["above_center_heavy_atoms"] > 0, "upper lipid leaflet is missing")
     protein_z = protein["z_range_nm"]
     lipid_z = lipid["z_range_nm"]
-    require(protein_z[0] < 0 < protein_z[1], "protein does not span the membrane center plane")
-    require(lipid_z[0] < 0 < lipid_z[1], "lipid bilayer does not straddle the membrane center plane")
+    require(protein_z[0] < center_z < protein_z[1], "protein does not span the membrane center plane")
+    require(lipid_z[0] < center_z < lipid_z[1], "lipid bilayer does not straddle the membrane center plane")
     distance = geometry["minimum_ligand_protein_heavy_distance_nm"]
     require(0 < distance < 0.8, f"ligand is not close to the protein (distance={distance:.3f} nm)")
 

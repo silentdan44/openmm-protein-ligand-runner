@@ -10,6 +10,18 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+PLOT_FILES = (
+    "simulation_qc.png", "protein_stability.png", "protein_rmsf.png", "ligand_pocket.png",
+    "contact_occupancy.png", "hydrogen_bond_occupancy.png", "membrane_integrity.png",
+    "residue_distances.png", "mmpbsa_energy_terms.png", "mmpbsa_energy_summary.png",
+    "mmpbsa_residue_decomposition.png",
+    # Remove these pre-report plots when regenerating an analysis directory.
+    "diagnostics.png", "temperature.png", "potential_energy.png", "kinetic_energy.png",
+    "total_energy.png", "npt_density.png", "npt_box_volume.png", "protein_backbone_rmsd.png",
+    "ligand_rmsd.png", "protein_radius_of_gyration.png", "ligand_radius_of_gyration.png",
+    "ligand_protein_contacts.png",
+)
+
 
 def _save_optional_plot(path, name, draw):
     """Create one figure; absent/invalid optional data never aborts the report."""

@@ -1,7 +1,8 @@
-"""Analysis orchestration and optional gmx_MMPBSA post-processing."""
+"""Trajectory analysis, reporting, and optional gmx_MMPBSA processing."""
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import logging
@@ -11,7 +12,7 @@ import subprocess
 from pathlib import Path
 
 from .analysis_metrics import trajectory_metrics
-from .analysis_plots import _plot_mmpbsa, _plot_qc, _plot_trajectory, build_report
+from .analysis_plots import PLOT_FILES, _plot_mmpbsa, _plot_qc, _plot_trajectory, build_report
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +31,6 @@ def read_state_data(path):
             except (TypeError, ValueError):
                 continue
     return rows
-
-
-def phase_for_step(step, nvt_steps, npt_steps):
-    if step <= nvt_steps:
-        return "NVT"
-    if step <= nvt_steps + npt_steps:
-        return "NPT"
-    return "Production"
 
 
 def write_index_file(path, protein_indices, ligand_indices):
@@ -244,16 +237,7 @@ def analyze_run(output_dir, config, *, perform_mmpbsa=False, mmpbsa_model="gb",
     output_dir = Path(output_dir)
     analysis_dir = output_dir / "analysis"
     analysis_dir.mkdir(parents=True, exist_ok=True)
-    known_plots = {
-        "simulation_qc.png", "protein_stability.png", "protein_rmsf.png", "ligand_pocket.png",
-        "contact_occupancy.png", "hydrogen_bond_occupancy.png", "membrane_integrity.png",
-        "residue_distances.png", "mmpbsa_energy_terms.png", "mmpbsa_energy_summary.png",
-        "mmpbsa_residue_decomposition.png", "diagnostics.png", "temperature.png",
-        "potential_energy.png", "kinetic_energy.png", "total_energy.png", "npt_density.png",
-        "npt_box_volume.png", "protein_backbone_rmsd.png", "ligand_rmsd.png",
-        "protein_radius_of_gyration.png", "ligand_radius_of_gyration.png", "ligand_protein_contacts.png",
-    }
-    for name in known_plots:
+    for name in PLOT_FILES:
         (analysis_dir / name).unlink(missing_ok=True)
     for name in ("protein_ligand_contacts.csv", "protein_ligand_hbonds.csv", "residue_distances.csv"):
         (analysis_dir / name).unlink(missing_ok=True)
@@ -330,3 +314,64 @@ def analyze_run(output_dir, config, *, perform_mmpbsa=False, mmpbsa_model="gb",
     (analysis_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
     build_report(analysis_dir, metrics, generated, warnings=warnings)
     return analysis_dir
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", default="output", help="Completed OpenMM run directory")
+    parser.add_argument("--mmpbsa", action="store_true", help="Also run gmx_MMPBSA")
+    parser.add_argument("--mmpbsa-model", choices=("gb", "pb", "pb_mem"), default="gb")
+    parser.add_argument("--mmpbsa-interval", type=int, default=1)
+    parser.add_argument("--mmpbsa-last-ns", type=float,
+                        help="Restrict MMPBSA to the final N ns of production")
+    parser.add_argument("--analysis-stride", type=int, default=10)
+    parser.add_argument("--mmpbsa-membrane-thickness-angstrom", type=float)
+    parser.add_argument("--mmpbsa-membrane-dielectric", type=float, default=7.0)
+    parser.add_argument("--mmpbsa-decomposition", action="store_true",
+                        help="Also calculate per-residue MMPBSA decomposition")
+    parser.add_argument("--distance-pair", action="append", nargs=2,
+                        metavar=("CHAIN:RESID", "CHAIN:RESID"),
+                        help="Plot Cα distance between two residues; repeat to add pairs")
+    args = parser.parse_args()
+    if args.mmpbsa_interval < 1:
+        parser.error("--mmpbsa-interval must be a positive integer")
+    if args.mmpbsa_last_ns is not None and (
+        not math.isfinite(args.mmpbsa_last_ns) or args.mmpbsa_last_ns <= 0
+    ):
+        parser.error("--mmpbsa-last-ns must be a positive finite number")
+    if args.analysis_stride < 1:
+        parser.error("--analysis-stride must be a positive integer")
+    if args.mmpbsa and args.mmpbsa_model == "pb_mem" and (
+        args.mmpbsa_membrane_thickness_angstrom is None
+        or not math.isfinite(args.mmpbsa_membrane_thickness_angstrom)
+        or args.mmpbsa_membrane_thickness_angstrom <= 0
+    ):
+        parser.error("pb_mem requires a positive --mmpbsa-membrane-thickness-angstrom")
+    if args.mmpbsa_decomposition and not args.mmpbsa:
+        parser.error("--mmpbsa-decomposition requires --mmpbsa")
+
+    output_dir = Path(args.output)
+    progress_path = output_dir / "run_state.json"
+    if not progress_path.is_file():
+        parser.error(f"No run_state.json found in {output_dir}")
+    state = json.loads(progress_path.read_text())
+    config = state["configuration"]
+    if args.mmpbsa and args.mmpbsa_model == "pb_mem" and not config.get("membrane"):
+        parser.error("pb_mem requires a completed membrane run")
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    result = analyze_run(
+        output_dir, config, perform_mmpbsa=args.mmpbsa,
+        mmpbsa_model=args.mmpbsa_model, mmpbsa_interval=args.mmpbsa_interval,
+        mmpbsa_last_ns=args.mmpbsa_last_ns,
+        mmpbsa_membrane_thickness_angstrom=args.mmpbsa_membrane_thickness_angstrom,
+        mmpbsa_membrane_dielectric=args.mmpbsa_membrane_dielectric,
+        analysis_stride=args.analysis_stride,
+        mmpbsa_decomposition=args.mmpbsa_decomposition,
+        distance_pairs=args.distance_pair,
+    )
+    print(f"Analysis report: {result / 'report.html'}")
+
+
+if __name__ == "__main__":
+    main()

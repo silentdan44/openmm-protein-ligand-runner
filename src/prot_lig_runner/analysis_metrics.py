@@ -280,9 +280,10 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
             _write_rows(Path(analysis_dir) / "protein_ligand_hbonds.csv",
                         ["protein_residue", "protein_atom", "ligand_atom", "occupancy",
                          "mean_donor_acceptor_distance_nm"], hbond_rows)
-    except (ValueError, IndexError) as error:
+    except Exception as error:
         # Hydrogen-bond analysis is optional and must not suppress other plots.
         hbond_rows = []
+        logger.warning("Hydrogen-bond analysis skipped: %s", error)
 
     membrane_rmsd = None
     if membrane_core_ca:

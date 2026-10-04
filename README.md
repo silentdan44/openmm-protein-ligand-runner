@@ -6,7 +6,6 @@ Docker runner for protein–ligand simulations. `tests/fixtures/` has an AQP3 so
 
 ```text
 src/prot_lig_runner/   Simulation, diagnostics, and analysis package
-tests/                 Unit tests
 tests/fixtures/        Test receptor and ligand structures
 tests/                 Unit tests
 Dockerfile             Reproducible runtime image
@@ -24,7 +23,7 @@ The image pins the Python simulation dependencies and builds the standalone TmDe
 
 ## CPU and NVIDIA GPU runtime
 
-The single image includes the CUDA 12 runtime and OpenMM CUDA platform, so it can be built on a machine without an NVIDIA GPU. The host needs a supported NVIDIA driver and NVIDIA Container Toolkit to expose a GPU to the container. Without GPU passthrough, `--platform auto` falls back to CPU.
+The single image includes the CUDA 12 runtime and OpenMM CUDA platform, so it can be built on a machine without an NVIDIA GPU. The container loads CPU/OpenCL plugins by default and adds CUDA plugins only when NVIDIA GPU passthrough is present. The host needs a supported NVIDIA driver and NVIDIA Container Toolkit to expose a GPU to the container. Without GPU passthrough, `--platform auto` falls back to CPU.
 
 ```bash
 docker build -t openmm-protein-ligand-runner:latest .
@@ -36,8 +35,8 @@ On a host with an NVIDIA GPU, pass it through and let the runner select the work
 docker run --rm --gpus all \
   -v "$HOME/openmm-protein-ligand-runner-results:/results" \
   openmm-protein-ligand-runner:latest \
-  --receptor /app/tests/fixtures/aqp3_solution_test_receptor.pdb \
-  --ligand /app/tests/fixtures/aqp3_solution_test_ligand.sdf \
+  --receptor /app/tests/fixtures/aqp3_receptor.pdb \
+  --ligand /app/tests/fixtures/aqp3_ligand.sdf \
   --output /results --platform auto
 ```
 
@@ -52,8 +51,8 @@ mkdir -p "$HOME/openmm-protein-ligand-runner-results"
 docker run --rm \
   -v "$HOME/openmm-protein-ligand-runner-results:/results" \
   openmm-protein-ligand-runner \
-  --receptor /app/tests/fixtures/aqp3_solution_test_receptor.pdb \
-  --ligand /app/tests/fixtures/aqp3_solution_test_ligand.sdf \
+  --receptor /app/tests/fixtures/aqp3_receptor.pdb \
+  --ligand /app/tests/fixtures/aqp3_ligand.sdf \
   --output /results
 ```
 
@@ -65,8 +64,8 @@ The TmDet mode transforms both the receptor and ligand by the same rigid-body tr
 docker run --rm \
   -v "$HOME/openmm-protein-ligand-runner-results:/results" \
   openmm-protein-ligand-runner \
-  --receptor /app/tests/fixtures/trpv4_membrane_test_receptor.pdb \
-  --ligand /app/tests/fixtures/trpv4_membrane_test_ligand.sdf \
+  --receptor /app/tests/fixtures/trpv4_receptor.pdb \
+  --ligand /app/tests/fixtures/trpv4_ligand.sdf \
   --output /results \
   --membrane --orientation tmdet --lipid-type POPC \
   --membrane-padding-nm 1.0 --ionic-strength-molar 0.15 \
@@ -96,7 +95,7 @@ To check that a short TRPV4 run completed dynamics and produced a bilayer, water
 docker run --rm --entrypoint python \
   -v "$HOME/openmm-protein-ligand-runner-results:/results:ro" \
   openmm-protein-ligand-runner \
-  -m prot_lig_runner.validate_trpv4_membrane /results
+  -m prot_lig_runner.validate_membrane /results
 ```
 
 The validator requires `run_state.json` to report a completed run and checks `membrane_geometry.json`, the final PDB, and non-empty trajectory. It is a structural smoke check, not a substitute for visual inspection or scientific validation.
@@ -128,7 +127,7 @@ To plot distances between selected residues, repeat `--distance-pair CHAIN:RESID
 ```bash
 docker run --rm --entrypoint python \
   -v "$HOME/openmm-protein-ligand-runner-results:/results" \
-  openmm-protein-ligand-runner -m prot_lig_runner.analyze_run --output /results \
+  openmm-protein-ligand-runner -m prot_lig_runner.analysis --output /results \
   --distance-pair A:550 A:600 --distance-pair A:550 B:600
 ```
 
@@ -139,11 +138,11 @@ Rebuild the report or run the optional end-state calculation from an existing re
 ```bash
 docker run --rm --entrypoint python \
   -v "$HOME/openmm-protein-ligand-runner-results:/results" \
-  openmm-protein-ligand-runner -m prot_lig_runner.analyze_run --output /results
+  openmm-protein-ligand-runner -m prot_lig_runner.analysis --output /results
 
 docker run --rm --entrypoint python \
   -v "$HOME/openmm-protein-ligand-runner-results:/results" \
-  openmm-protein-ligand-runner -m prot_lig_runner.analyze_run --output /results --mmpbsa \
+  openmm-protein-ligand-runner -m prot_lig_runner.analysis --output /results --mmpbsa \
   --mmpbsa-model gb --mmpbsa-last-ns 20 --mmpbsa-interval 2
 ```
 

@@ -5,7 +5,7 @@ import types
 import unittest
 from pathlib import Path
 
-from prot_lig_runner.stability_diagnostics import (
+from prot_lig_runner.stability import (
     StabilityReporter,
     diagnose_failure,
     find_severe_overlaps,
@@ -52,7 +52,7 @@ class FakePositions:
         return self.coordinates
 
 
-class StabilityDiagnosticsTests(unittest.TestCase):
+class StabilityTests(unittest.TestCase):
     def setUp(self):
         self.original_openmm = sys.modules.get("openmm")
         sys.modules["openmm"] = types.SimpleNamespace(

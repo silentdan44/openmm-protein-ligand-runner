@@ -6,13 +6,13 @@ import openmm as mm
 from openmm import app, unit
 
 from openff.interchange import Interchange
-from prot_lig_runner.interchange_compat import (
+from prot_lig_runner.topology_export import (
     enable_batched_openmm_topology_conversion,
     keep_interchange_molecules_separate,
 )
 
 
-class InterchangeCompatibilityTests(unittest.TestCase):
+class TopologyExportTests(unittest.TestCase):
     def test_keeps_large_molecule_types_separate_without_graph_matching(self):
         topology = SimpleNamespace(molecules=[SimpleNamespace(n_atoms=3), SimpleNamespace(n_atoms=2)])
         interchange = SimpleNamespace(topology=topology)
