@@ -67,7 +67,8 @@ def parse_args():
         "--receptor", default="tests/fixtures/aqp3_receptor.pdb", help="Receptor PDB path"
     )
     parser.add_argument(
-        "--ligand", default="tests/fixtures/aqp3_ligand.sdf", help="Single-ligand SDF path"
+        "--ligand", action="append", dest="ligands",
+        help="Ligand SDF path; repeat to include multiple ligands in one simulation",
     )
     parser.add_argument("--output", default="output", help="Output directory")
     parser.add_argument("--nvt-steps", type=positive_int, default=250_000)
@@ -135,6 +136,7 @@ def parse_args():
         help="Plot Cα distance between two residues; repeat to add pairs, e.g. --distance-pair A:550 A:600",
     )
     args = parser.parse_args()
+    args.ligands = args.ligands or ["tests/fixtures/aqp3_ligand.sdf"]
     if args.mmpbsa and args.skip_gromacs_export:
         parser.error("--mmpbsa requires its protein-ligand-only GROMACS topology; remove --skip-gromacs-export")
     if args.membrane:
@@ -316,7 +318,8 @@ def prepare_membrane_orientation(args, fixer, ligand_positions, receptor_path, o
         target_center = np.asarray((0.0, 0.0, args.membrane_center_z_nm))
     return (
         transform_positions(fixer.positions, rotation, source_center, target_center),
-        transform_positions(ligand_positions, rotation, source_center, target_center),
+        [transform_positions(positions, rotation, source_center, target_center)
+         for positions in ligand_positions],
     )
 
 
@@ -396,10 +399,11 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def run_configuration(args, receptor, ligand):
+def run_configuration(args, receptor, ligands):
     package_dir = Path(__file__).parent
     return {
-        "inputs": {"receptor_sha256": sha256_file(receptor), "ligand_sha256": sha256_file(ligand)},
+        "inputs": {"receptor_sha256": sha256_file(receptor),
+                   "ligand_sha256": [sha256_file(ligand) for ligand in ligands]},
         "source_sha256": {
             path.name: sha256_file(path)
             for path in sorted(package_dir.glob("*.py"))
@@ -478,10 +482,10 @@ def derived_seed(seed, offset):
 def main():
     args = parse_args()
     receptor_path = Path(args.receptor)
-    ligand_path = Path(args.ligand)
+    ligand_paths = [Path(path) for path in args.ligands]
     output_dir = Path(args.output)
 
-    for label, path in (("receptor", receptor_path), ("ligand", ligand_path)):
+    for label, path in (("receptor", receptor_path), *[(f"ligand {index}", path) for index, path in enumerate(ligand_paths, 1)]):
         if not path.is_file():
             raise SystemExit(f"{label} file does not exist or is not a file: {path}")
     if not math.isfinite(args.ionic_strength_molar) or args.ionic_strength_molar < 0:
@@ -489,7 +493,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     resume = args.resume
     progress_path = output_dir / PROGRESS_FILE
-    config = run_configuration(args, receptor_path, ligand_path)
+    config = run_configuration(args, receptor_path, ligand_paths)
     previous_progress = None
     if resume:
         if not progress_path.is_file():
@@ -532,19 +536,22 @@ def main():
     current_phase = "preparation"
     initial_overlaps = []
     try:
-        logger.info("Loading ligand from %s", ligand_path)
-        ligand = Molecule.from_file(str(ligand_path))
-        if isinstance(ligand, list):
-            if len(ligand) != 1:
-                raise ValueError(f"SDF must contain exactly one ligand; found {len(ligand)}")
-            ligand = ligand[0]
-        if ligand.n_atoms == 0 or not ligand.conformers:
-            raise ValueError("Ligand SDF must contain atoms and at least one 3D conformer")
+        ligands = []
+        for ligand_path in ligand_paths:
+            logger.info("Loading ligand from %s", ligand_path)
+            loaded = Molecule.from_file(str(ligand_path))
+            if isinstance(loaded, list):
+                if len(loaded) != 1:
+                    raise ValueError(f"Each ligand SDF must contain exactly one molecule; found {len(loaded)} in {ligand_path}")
+                loaded = loaded[0]
+            if loaded.n_atoms == 0 or not loaded.conformers:
+                raise ValueError(f"Ligand SDF must contain atoms and at least one 3D conformer: {ligand_path}")
+            ligands.append(loaded)
 
         logger.info("Preparing receptor %s with PDBFixer", receptor_path)
         fixer = PDBFixer(filename=str(receptor_path))
-        ligand_topology = Topology.from_molecules([ligand]).to_openmm()
-        ligand_positions = off_to_omm(ligand.conformers[0])
+        ligand_topologies = [Topology.from_molecules([ligand]).to_openmm() for ligand in ligands]
+        ligand_positions = [off_to_omm(ligand.conformers[0]) for ligand in ligands]
         if args.membrane:
             fixer.positions, ligand_positions = prepare_membrane_orientation(
                 args, fixer, ligand_positions, receptor_path, output_dir
@@ -561,7 +568,7 @@ def main():
         fixer.findMissingAtoms()
         fixer.addMissingAtoms()
 
-        smirnoff = SMIRNOFFTemplateGenerator(molecules=ligand)
+        smirnoff = SMIRNOFFTemplateGenerator(molecules=ligands)
         forcefield_files = [PROTEIN_FF]
         if args.membrane:
             forcefield_files.append("amber14/lipid17.xml")
@@ -570,9 +577,10 @@ def main():
         forcefield.registerTemplateGenerator(smirnoff.generator)
         modeller = app.Modeller(fixer.topology, fixer.positions)
 
-        for residue in ligand_topology.residues():
-            residue.name = "LIG"
-        modeller.add(ligand_topology, ligand_positions)
+        for ligand_topology, positions in zip(ligand_topologies, ligand_positions):
+            for residue in ligand_topology.residues():
+                residue.name = "LIG"
+            modeller.add(ligand_topology, positions)
 
         logger.info("Adding hydrogens and %s", "membrane plus water" if args.membrane else "solvent")
         python_rng_state = random.getstate()

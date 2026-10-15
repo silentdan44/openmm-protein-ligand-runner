@@ -48,7 +48,13 @@ For a larger TRPV4 run, replace the two fixture paths with `trpv4_receptor.pdb` 
 
 ## Inputs and membrane orientation
 
-Mount custom receptor and ligand files read-only, then pass their container paths with `--receptor` and `--ligand`. The receptor must be a PDB; the ligand must be one molecule with a 3D conformer in the receptor's coordinate frame.
+Mount custom receptor and ligand files read-only, then pass their container paths with `--receptor` and `--ligand`. Repeat `--ligand` once per molecule to simulate a shared protein complex containing several ligands. Each SDF must contain exactly one molecule with a 3D conformer in the receptor's coordinate frame. All ligands are parameterized and restrained together; ligand interaction metrics in the report aggregate across them.
+
+```bash
+--receptor /inputs/receptor.pdb \
+--ligand /inputs/ligand_a.sdf \
+--ligand /inputs/ligand_b.sdf
+```
 
 - `--orientation tmdet` runs local TmDet and applies its rigid-body transform to both receptor and ligand, preserving their relative pose.
 - `--orientation preoriented` uses the supplied coordinates. The membrane plane must be XY and its center must match `--membrane-center-z-nm`.
