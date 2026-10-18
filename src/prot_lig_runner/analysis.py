@@ -125,8 +125,12 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
         raise ValueError("The MMPBSA last-ns window must be a positive finite number")
     model_namelist = "&gb\n igb=5, saltcon=0.150,\n/\n" if model == "gb" else "&pb\n istrng=0.150,\n/\n"
     if model == "pb_mem":
-        if membrane_thickness_angstrom is None or membrane_thickness_angstrom <= 0:
+        if (membrane_thickness_angstrom is None
+                or not math.isfinite(float(membrane_thickness_angstrom))
+                or float(membrane_thickness_angstrom) <= 0):
             raise ValueError("The pb_mem model requires a positive membrane thickness in angstroms")
+        if not math.isfinite(float(membrane_dielectric)) or float(membrane_dielectric) <= 0:
+            raise ValueError("The pb_mem model requires a positive finite membrane dielectric")
         state = json.loads((output_dir / "run_state.json").read_text())
         if not state["configuration"].get("membrane"):
             raise ValueError("The pb_mem model requires an OpenMM membrane run")
@@ -347,6 +351,11 @@ def main():
         or args.mmpbsa_membrane_thickness_angstrom <= 0
     ):
         parser.error("pb_mem requires a positive --mmpbsa-membrane-thickness-angstrom")
+    if args.mmpbsa and args.mmpbsa_model == "pb_mem" and (
+        not math.isfinite(args.mmpbsa_membrane_dielectric)
+        or args.mmpbsa_membrane_dielectric <= 0
+    ):
+        parser.error("pb_mem requires a positive finite --mmpbsa-membrane-dielectric")
     if args.mmpbsa_decomposition and not args.mmpbsa:
         parser.error("--mmpbsa-decomposition requires --mmpbsa")
 
