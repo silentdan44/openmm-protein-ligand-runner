@@ -801,10 +801,7 @@ def main():
             remaining = max(0, npt_end - simulation.currentStep)
             logger.info("Running NPT for %d remaining steps", remaining)
             simulation.step(remaining)
-            for force_index in reversed(range(simulation.system.getNumForces())):
-                if isinstance(simulation.system.getForce(force_index), mm.CustomExternalForce):
-                    simulation.system.removeForce(force_index)
-            simulation.context.reinitialize(preserveState=True)
+            simulation.context.setParameter("k", 0.0)
             diagnostic_reporter.previous_energy_kj_mol = None
             phase = "prod"
             checkpoint(phase)
