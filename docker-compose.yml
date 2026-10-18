@@ -8,10 +8,6 @@ x-runner: &runner
     - /data/aqp3_ligand.sdf
     - --output
     - /results
-    - --nvt-steps
-    - ${NVT_STEPS:-250000}
-    - --npt-steps
-    - ${NPT_STEPS:-500000}
     - --prod-steps
     - ${PROD_STEPS:-250000000}
   volumes:
