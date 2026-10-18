@@ -1,4 +1,5 @@
 import argparse
+import csv
 import hashlib
 import json
 import logging
@@ -515,6 +516,83 @@ def save_checkpoint_atomically(simulation, path):
     temporary.replace(path)
 
 
+class AtomicCheckpointReporter:
+    """Write periodic checkpoints atomically so interruption preserves the prior one."""
+
+    def __init__(self, path, interval):
+        self.path = Path(path)
+        self.interval = interval
+
+    def describeNextReport(self, simulation):
+        steps = self.interval - simulation.currentStep % self.interval
+        return (steps, False, False, False, False)
+
+    def report(self, simulation, state):
+        save_checkpoint_atomically(simulation, self.path)
+
+
+def truncate_state_data_to_step(path, checkpoint_step):
+    """Drop reporter rows that were written after the loaded checkpoint."""
+    path = Path(path)
+    if not path.is_file() or path.stat().st_size == 0:
+        return 0
+
+    temporary = path.with_name(path.name + ".resume.tmp")
+    kept = 0
+    with path.open(newline="") as source:
+        reader = csv.DictReader(source)
+        if not reader.fieldnames or "Step" not in reader.fieldnames:
+            raise ValueError(f"Cannot safely resume: {path} has no Step column")
+        with temporary.open("w", newline="") as target:
+            writer = csv.DictWriter(
+                target, fieldnames=reader.fieldnames, extrasaction="ignore"
+            )
+            writer.writeheader()
+            for row in reader:
+                try:
+                    row_step = float(row["Step"])
+                except (TypeError, ValueError):
+                    continue
+                if row_step <= checkpoint_step:
+                    writer.writerow(row)
+                    kept += 1
+    temporary.replace(path)
+    return kept
+
+
+def truncate_trajectory_to_time(path, topology_path, checkpoint_time_ps, timestep_fs):
+    """Keep only complete XTC frames at or before the checkpoint time."""
+    import mdtraj as md
+
+    path, topology_path = Path(path), Path(topology_path)
+    if not path.is_file() or path.stat().st_size == 0:
+        return 0
+
+    temporary = path.with_name(path.name + ".resume.tmp")
+    frames_kept = 0
+    time_tolerance_ps = min(float(timestep_fs) / 2000.0, 0.0005)
+    try:
+        with md.formats.XTCTrajectoryFile(str(temporary), mode="w") as writer:
+            for chunk in md.iterload(str(path), top=str(topology_path), chunk=1000):
+                selected = chunk[chunk.time <= checkpoint_time_ps + time_tolerance_ps]
+                if selected.n_frames:
+                    writer.write(
+                        selected.xyz, time=selected.time, box=selected.unitcell_vectors
+                    )
+                    frames_kept += selected.n_frames
+    except Exception:
+        if frames_kept == 0:
+            temporary.unlink(missing_ok=True)
+            raise
+        logger.warning(
+            "The trajectory tail could not be read while resuming; keeping its %d valid frames",
+            frames_kept,
+            exc_info=True,
+        )
+    temporary.replace(path)
+    return frames_kept
+
+
 def package_version(name):
     try:
         return version(name)
@@ -824,6 +902,20 @@ def main():
         if resume:
             simulation.loadCheckpoint(str(checkpoint_path))
             logger.info("Resumed %s phase at step %d", phase, simulation.currentStep)
+            kept_rows = truncate_state_data_to_step(
+                output_dir / "state_data.csv", simulation.currentStep
+            )
+            checkpoint_time_ps = simulation.currentStep * args.timestep_fs / 1000.0
+            kept_frames = truncate_trajectory_to_time(
+                output_dir / "trajectory.xtc",
+                output_dir / "system_final.pdb",
+                checkpoint_time_ps,
+                args.timestep_fs,
+            )
+            logger.info(
+                "Trimmed reporter outputs to checkpoint: %d state rows and %d trajectory frames retained",
+                kept_rows, kept_frames,
+            )
         else:
             simulation.context.setPositions(modeller.positions)
             logger.info("Minimizing energy")
@@ -856,7 +948,7 @@ def main():
                 app.XTCReporter(
                     str(trajectory_file), args.xtc_interval, append=append_trajectory
                 ),
-                app.CheckpointReporter(str(checkpoint_path), args.checkpoint_interval),
+                AtomicCheckpointReporter(checkpoint_path, args.checkpoint_interval),
             ]
         )
 
@@ -867,10 +959,10 @@ def main():
             simulation.reporters = [
                 reporter
                 for reporter in simulation.reporters
-                if not isinstance(reporter, app.CheckpointReporter)
+                if not isinstance(reporter, AtomicCheckpointReporter)
             ]
             simulation.reporters.append(
-                app.CheckpointReporter(str(checkpoint_path), args.checkpoint_interval)
+                AtomicCheckpointReporter(checkpoint_path, args.checkpoint_interval)
             )
             write_progress(
                 progress_path, phase_name, config, platform.getName(), checkpoint_path.name
