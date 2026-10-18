@@ -699,7 +699,7 @@ def main():
         fixer.findNonstandardResidues()
         fixer.replaceNonstandardResidues()
         fixer.findMissingAtoms()
-        fixer.addMissingAtoms()
+        fixer.addMissingAtoms(seed=derived_seed(args.seed, 3))
 
         smirnoff = SMIRNOFFTemplateGenerator(molecules=ligands)
         forcefield_files = [PROTEIN_FF]
