@@ -330,8 +330,14 @@ def prepare_membrane_orientation(args, fixer, ligand_positions, receptor_path, o
 
 
 def add_positional_restraints(system, positions, atom_indices, parameter_name, axes=("x", "y", "z")):
-    expression = " + ".join(f"({axis}-{axis}0)^2" for axis in axes)
-    force = mm.CustomExternalForce(f"0.5*{parameter_name}*({expression})")
+    if axes == ("x", "y", "z"):
+        displacement_squared = "periodicdistance(x,y,z,x0,y0,z0)^2"
+    elif axes == ("z",):
+        # Membrane boxes are aligned to Z; zeroing X/Y keeps this a Z-only restraint.
+        displacement_squared = "periodicdistance(0,0,z,0,0,z0)^2"
+    else:
+        raise ValueError(f"Unsupported positional-restraint axes: {axes}")
+    force = mm.CustomExternalForce(f"0.5*{parameter_name}*({displacement_squared})")
     force.addGlobalParameter(parameter_name, INITIAL_RESTRAINT_K)
     for parameter in ("x0", "y0", "z0"):
         force.addPerParticleParameter(parameter)
