@@ -713,7 +713,7 @@ def main():
 
         if args.mmpbsa:
             logger.info("Exporting protein-ligand-only topology for MMPBSA; membrane and solvent stay implicit")
-            export_mmpbsa_complex(forcefield, modeller, output_dir)
+            export_mmpbsa_complex(forcefield, modeller, output_dir, PROTEIN_RESIDUES)
         elif args.skip_gromacs_export:
             logger.info("Skipping GROMACS export as requested")
         else:
