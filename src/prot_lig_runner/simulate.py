@@ -39,7 +39,6 @@ TIMESTEP_FS = 2.0
 IONIC_STRENGTH_MOLAR = 0.15
 PADDING_NM = 1.0
 EQUILIBRATION_STAGE_PS = 250.0
-INITIAL_RESTRAINT_K = 1000.0
 RESTRAINT_PARAMETERS = {
     "protein_bb": "k_protein_bb",
     "protein_sc": "k_protein_sc",
@@ -329,7 +328,9 @@ def prepare_membrane_orientation(args, fixer, ligand_positions, receptor_path, o
     )
 
 
-def add_positional_restraints(system, positions, atom_indices, parameter_name, axes=("x", "y", "z")):
+def add_positional_restraints(
+    system, positions, atom_indices, parameter_name, initial_strength, axes=("x", "y", "z")
+):
     if axes == ("x", "y", "z"):
         displacement_squared = "periodicdistance(x,y,z,x0,y0,z0)^2"
     elif axes == ("z",):
@@ -338,7 +339,7 @@ def add_positional_restraints(system, positions, atom_indices, parameter_name, a
     else:
         raise ValueError(f"Unsupported positional-restraint axes: {axes}")
     force = mm.CustomExternalForce(f"0.5*{parameter_name}*({displacement_squared})")
-    force.addGlobalParameter(parameter_name, INITIAL_RESTRAINT_K)
+    force.addGlobalParameter(parameter_name, float(initial_strength))
     for parameter in ("x0", "y0", "z0"):
         force.addPerParticleParameter(parameter)
     for index in atom_indices:
@@ -851,6 +852,8 @@ def main():
             ]
             if not lipid_p_indices:
                 raise ValueError("No lipid phosphorus atoms found; cannot apply membrane equilibration restraints")
+        raw_schedule = staged_equilibration_schedule(args.membrane)
+        initial_restraints = raw_schedule[0][2]
         logger.info(
             "Applying staged restraints to %d protein backbone heavy atoms, %d side-chain heavy atoms, "
             "%d ligand heavy atoms%s",
@@ -858,20 +861,23 @@ def main():
             f", and {len(lipid_p_indices)} lipid phosphorus atoms along Z" if args.membrane else "",
         )
         add_positional_restraints(
-            system, modeller.positions, protein_bb_indices, RESTRAINT_PARAMETERS["protein_bb"]
+            system, modeller.positions, protein_bb_indices, RESTRAINT_PARAMETERS["protein_bb"],
+            initial_restraints["protein_bb"],
         )
         add_positional_restraints(
-            system, modeller.positions, protein_sc_indices, RESTRAINT_PARAMETERS["protein_sc"]
+            system, modeller.positions, protein_sc_indices, RESTRAINT_PARAMETERS["protein_sc"],
+            initial_restraints["protein_sc"],
         )
         add_positional_restraints(
-            system, modeller.positions, ligand_heavy_indices, RESTRAINT_PARAMETERS["ligand"]
+            system, modeller.positions, ligand_heavy_indices, RESTRAINT_PARAMETERS["ligand"],
+            initial_restraints["ligand"],
         )
         if args.membrane:
             add_positional_restraints(
-                system, modeller.positions, lipid_p_indices, RESTRAINT_PARAMETERS["lipid_pz"], axes=("z",)
+                system, modeller.positions, lipid_p_indices, RESTRAINT_PARAMETERS["lipid_pz"],
+                initial_restraints["lipid_pz"], axes=("z",),
             )
 
-        raw_schedule = staged_equilibration_schedule(args.membrane)
         stage_steps = equilibration_stage_steps(args.timestep_fs)
         schedule_steps = [stage_steps] * (len(raw_schedule) - 1) + [args.prod_steps]
         stages = []
