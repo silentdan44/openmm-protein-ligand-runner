@@ -37,7 +37,14 @@ FRICTION_PER_PS = 1.0
 TIMESTEP_FS = 2.0
 IONIC_STRENGTH_MOLAR = 0.15
 PADDING_NM = 1.0
-RESTRAINT_K = 1000.0 * u.kilojoule_per_mole / u.nanometer**2
+EQUILIBRATION_STAGE_PS = 250.0
+INITIAL_RESTRAINT_K = 1000.0
+RESTRAINT_PARAMETERS = {
+    "protein_bb": "k_protein_bb",
+    "protein_sc": "k_protein_sc",
+    "ligand": "k_ligand",
+    "lipid_pz": "k_lipid_pz",
+}
 PROTEIN_FF = "amber14/protein.ff14SB.xml"
 WATER_FF = "amber14/tip3p.xml"
 PROTEIN_RESIDUES = frozenset(
@@ -71,8 +78,6 @@ def parse_args():
         help="Ligand SDF path; repeat to include multiple ligands in one simulation",
     )
     parser.add_argument("--output", default="output", help="Output directory")
-    parser.add_argument("--nvt-steps", type=positive_int, default=250_000)
-    parser.add_argument("--npt-steps", type=positive_int, default=500_000)
     parser.add_argument("--prod-steps", type=positive_int, default=250_000_000)
     parser.add_argument("--report-interval", type=positive_int, default=10_000)
     parser.add_argument("--xtc-interval", type=positive_int, default=50_000)
@@ -323,15 +328,47 @@ def prepare_membrane_orientation(args, fixer, ligand_positions, receptor_path, o
     )
 
 
-def add_positional_restraints(system, positions, atom_indices, k):
-    force = mm.CustomExternalForce("0.5*k*((x-x0)^2 + (y-y0)^2 + (z-z0)^2)")
-    force.addGlobalParameter("k", k)
+def add_positional_restraints(system, positions, atom_indices, parameter_name, axes=("x", "y", "z")):
+    expression = " + ".join(f"({axis}-{axis}0)^2" for axis in axes)
+    force = mm.CustomExternalForce(f"0.5*{parameter_name}*({expression})")
+    force.addGlobalParameter(parameter_name, INITIAL_RESTRAINT_K)
     for parameter in ("x0", "y0", "z0"):
         force.addPerParticleParameter(parameter)
     for index in atom_indices:
         force.addParticle(index, positions[index].value_in_unit(u.nanometers))
     system.addForce(force)
     return force
+
+
+def staged_equilibration_schedule(membrane):
+    if membrane:
+        return [
+            ("nvt1", "nvt", {"protein_bb": 1000, "protein_sc": 1000, "ligand": 1000, "lipid_pz": 1000}),
+            ("nvt2", "nvt", {"protein_bb": 500, "protein_sc": 500, "ligand": 500, "lipid_pz": 500}),
+            ("npt1", "npt", {"protein_bb": 500, "protein_sc": 250, "ligand": 500, "lipid_pz": 500}),
+            ("npt2", "npt", {"protein_bb": 250, "protein_sc": 100, "ligand": 250, "lipid_pz": 250}),
+            ("npt3", "npt", {"protein_bb": 100, "protein_sc": 50, "ligand": 100, "lipid_pz": 100}),
+            ("npt4", "npt", {"protein_bb": 0, "protein_sc": 0, "ligand": 0, "lipid_pz": 0}),
+            ("prod", "npt", {"protein_bb": 0, "protein_sc": 0, "ligand": 0, "lipid_pz": 0}),
+        ]
+    return [
+        ("nvt1", "nvt", {"protein_bb": 1000, "protein_sc": 1000, "ligand": 1000}),
+        ("nvt2", "nvt", {"protein_bb": 500, "protein_sc": 500, "ligand": 500}),
+        ("npt1", "npt", {"protein_bb": 500, "protein_sc": 250, "ligand": 500}),
+        ("npt2", "npt", {"protein_bb": 250, "protein_sc": 100, "ligand": 250}),
+        ("npt3", "npt", {"protein_bb": 100, "protein_sc": 50, "ligand": 100}),
+        ("npt4", "npt", {"protein_bb": 0, "protein_sc": 0, "ligand": 0}),
+        ("prod", "npt", {"protein_bb": 0, "protein_sc": 0, "ligand": 0}),
+    ]
+
+
+def equilibration_stage_steps(timestep_fs):
+    return max(1, round(EQUILIBRATION_STAGE_PS * 1000.0 / timestep_fs))
+
+
+def set_restraint_strengths(context, strengths):
+    for group, value in strengths.items():
+        context.setParameter(RESTRAINT_PARAMETERS[group], float(value))
 
 
 def make_barostat(args):
@@ -408,9 +445,19 @@ def run_configuration(args, receptor, ligands):
             path.name: sha256_file(path)
             for path in sorted(package_dir.glob("*.py"))
         },
-        "nvt_steps": args.nvt_steps,
-        "npt_steps": args.npt_steps,
+        "nvt_steps": 2 * equilibration_stage_steps(args.timestep_fs),
+        "npt_steps": 4 * equilibration_stage_steps(args.timestep_fs),
         "prod_steps": args.prod_steps,
+        "equilibration_protocol": "staged-restraints-fixed-duration-v2",
+        "equilibration_schedule": [
+            {
+                "phase": name,
+                "ensemble": ensemble,
+                "duration_ps": EQUILIBRATION_STAGE_PS if name not in {"prod"} else None,
+                "restraints_kj_mol_nm2": strengths,
+            }
+            for name, ensemble, strengths in staged_equilibration_schedule(args.membrane)
+        ],
         "report_interval": args.report_interval,
         "xtc_interval": args.xtc_interval,
         "temperature_k": args.temperature_k,
@@ -504,7 +551,8 @@ def main():
             raise SystemExit(f"Cannot resume: checkpoint file is missing: {checkpoint_path}")
         if previous_progress["configuration"] != config:
             raise SystemExit("Cannot resume: input files or simulation settings differ from checkpoint run")
-        if previous_progress["phase"] not in {"nvt", "npt", "prod", "complete"}:
+        valid_phases = {"nvt1", "nvt2", "npt1", "npt2", "npt3", "npt4", "prod", "complete"}
+        if previous_progress["phase"] not in valid_phases:
             raise SystemExit(f"Cannot resume: invalid run phase {previous_progress['phase']!r}")
         if previous_progress["phase"] == "complete":
             raise SystemExit("This run is already complete; start a new run without --resume")
@@ -694,27 +742,75 @@ def main():
             raise ValueError("No standard protein residues found; cannot apply protein restraints")
         if not ligand_indices:
             raise ValueError("No LIG residue found; cannot apply ligand restraints")
+        protein_atoms = [
+            atom for atom in modeller.topology.atoms()
+            if atom.residue.name in PROTEIN_RESIDUES
+            and atom.element is not None and atom.element.symbol != "H"
+        ]
+        backbone_names = {"N", "CA", "C", "O", "OXT"}
+        protein_bb_indices = [atom.index for atom in protein_atoms if atom.name.upper() in backbone_names]
+        protein_sc_indices = [atom.index for atom in protein_atoms if atom.name.upper() not in backbone_names]
+        ligand_heavy_indices = [
+            atom.index for atom in modeller.topology.atoms()
+            if atom.residue.name == "LIG" and atom.element is not None and atom.element.symbol != "H"
+        ]
+        if not protein_bb_indices:
+            raise ValueError("No protein backbone heavy atoms found; cannot apply protein restraints")
+        if not ligand_heavy_indices:
+            raise ValueError("No ligand heavy atoms found; cannot apply ligand restraints")
+        lipid_p_indices = []
+        if args.membrane:
+            lipid_residue_names = {args.lipid_type, args.lipid_type[:3]}
+            lipid_p_indices = [
+                atom.index for atom in modeller.topology.atoms()
+                if atom.residue.name in lipid_residue_names and atom.name.upper() == "P"
+            ]
+            if not lipid_p_indices:
+                raise ValueError("No lipid phosphorus atoms found; cannot apply membrane equilibration restraints")
         logger.info(
-            "Applying restraints to %d protein atoms and %d ligand atoms",
-            len(protein_indices), len(ligand_indices)
+            "Applying staged restraints to %d protein backbone heavy atoms, %d side-chain heavy atoms, "
+            "%d ligand heavy atoms%s",
+            len(protein_bb_indices), len(protein_sc_indices), len(ligand_heavy_indices),
+            f", and {len(lipid_p_indices)} lipid phosphorus atoms along Z" if args.membrane else "",
         )
-
         add_positional_restraints(
-            system, modeller.positions, protein_indices + ligand_indices, RESTRAINT_K
+            system, modeller.positions, protein_bb_indices, RESTRAINT_PARAMETERS["protein_bb"]
         )
-        phase = "nvt"
+        add_positional_restraints(
+            system, modeller.positions, protein_sc_indices, RESTRAINT_PARAMETERS["protein_sc"]
+        )
+        add_positional_restraints(
+            system, modeller.positions, ligand_heavy_indices, RESTRAINT_PARAMETERS["ligand"]
+        )
+        if args.membrane:
+            add_positional_restraints(
+                system, modeller.positions, lipid_p_indices, RESTRAINT_PARAMETERS["lipid_pz"], axes=("z",)
+            )
+
+        raw_schedule = staged_equilibration_schedule(args.membrane)
+        stage_steps = equilibration_stage_steps(args.timestep_fs)
+        schedule_steps = [stage_steps] * (len(raw_schedule) - 1) + [args.prod_steps]
+        stages = []
+        cumulative_steps = 0
+        for (stage_name, ensemble, strengths), step_count in zip(raw_schedule, schedule_steps):
+            cumulative_steps += step_count
+            stages.append({
+                "name": stage_name,
+                "ensemble": ensemble,
+                "restraints": strengths,
+                "end_step": cumulative_steps,
+            })
+        stage_names = [stage["name"] for stage in stages]
+        phase = "nvt1"
         if not resume:
             checkpoint_path = output_dir / f"checkpoint-{phase}.chk"
         else:
             checkpoint_path = output_dir / previous_progress["checkpoint"]
         if resume:
             phase = previous_progress["phase"]
-        if phase in ("npt", "prod"):
+        start_stage_index = stage_names.index(phase)
+        if stages[start_stage_index]["ensemble"] == "npt":
             system.addForce(make_barostat(args))
-            if phase == "prod":
-                for force_index in reversed(range(system.getNumForces())):
-                    if isinstance(system.getForce(force_index), mm.CustomExternalForce):
-                        system.removeForce(force_index)
 
         integrator = mm.LangevinMiddleIntegrator(
             args.temperature_k * u.kelvin,
@@ -780,63 +876,56 @@ def main():
                 progress_path, phase_name, config, platform.getName(), checkpoint_path.name
             )
 
-        nvt_end = args.nvt_steps
-        npt_end = args.nvt_steps + args.npt_steps
-        total_end = npt_end + args.prod_steps
+        if not resume:
+            checkpoint("nvt1")
         current_phase = phase
-        if phase == "nvt":
-            current_phase = "nvt"
-            checkpoint("nvt")
-            remaining = max(0, nvt_end - simulation.currentStep)
-            logger.info("Running NVT for %d remaining steps", remaining)
-            simulation.step(remaining)
-            simulation.system.addForce(make_barostat(args))
-            simulation.context.reinitialize(preserveState=True)
-            diagnostic_reporter.previous_energy_kj_mol = None
-            phase = "npt"
-            checkpoint(phase)
-
-        if phase == "npt":
-            current_phase = "npt"
-            remaining = max(0, npt_end - simulation.currentStep)
-            logger.info("Running NPT for %d remaining steps", remaining)
-            simulation.step(remaining)
-            simulation.context.setParameter("k", 0.0)
-            diagnostic_reporter.previous_energy_kj_mol = None
-            phase = "prod"
-            checkpoint(phase)
-
-        if phase == "prod":
-            current_phase = "prod"
-            remaining = max(0, total_end - simulation.currentStep)
-            logger.info("Running production for %d remaining steps", remaining)
-            simulation.step(remaining)
-            simulation.saveState(str(output_dir / "final_state.xml"))
-            checkpoint("complete")
-            logger.info("Simulation completed at step %d", simulation.currentStep)
-            from .analysis import analyze_run
-
-            analyze_run(
-                output_dir,
-                {
-                    **config,
-                    "nvt_steps": args.nvt_steps,
-                    "npt_steps": args.npt_steps,
-                    "prod_steps": args.prod_steps,
-                    "timestep_fs": args.timestep_fs,
-                    "temperature_k": args.temperature_k,
-                    "pressure_bar": args.pressure_bar,
-                },
-                perform_mmpbsa=args.mmpbsa,
-                mmpbsa_model=args.mmpbsa_model,
-                mmpbsa_interval=args.mmpbsa_interval,
-                mmpbsa_last_ns=args.mmpbsa_last_ns,
-                mmpbsa_membrane_thickness_angstrom=args.mmpbsa_membrane_thickness_angstrom,
-                mmpbsa_membrane_dielectric=args.mmpbsa_membrane_dielectric,
-                analysis_stride=args.analysis_stride,
-                mmpbsa_decomposition=args.mmpbsa_decomposition,
-                distance_pairs=args.distance_pair,
+        for stage_index in range(start_stage_index, len(stages)):
+            stage = stages[stage_index]
+            current_phase = stage["name"]
+            remaining = max(0, stage["end_step"] - simulation.currentStep)
+            logger.info(
+                "Running %s for %d remaining steps with restraints (kJ/mol/nm^2): %s",
+                current_phase.upper(), remaining, json.dumps(stage["restraints"], sort_keys=True),
             )
+            if remaining:
+                simulation.step(remaining)
+            diagnostic_reporter.previous_energy_kj_mol = None
+
+            if stage["name"] == "prod":
+                simulation.saveState(str(output_dir / "final_state.xml"))
+                checkpoint("complete")
+                logger.info("Simulation completed at step %d", simulation.currentStep)
+                from .analysis import analyze_run
+
+                analyze_run(
+                    output_dir,
+                    {
+                        **config,
+                        "prod_steps": args.prod_steps,
+                        "timestep_fs": args.timestep_fs,
+                        "temperature_k": args.temperature_k,
+                        "pressure_bar": args.pressure_bar,
+                    },
+                    perform_mmpbsa=args.mmpbsa,
+                    mmpbsa_model=args.mmpbsa_model,
+                    mmpbsa_interval=args.mmpbsa_interval,
+                    mmpbsa_last_ns=args.mmpbsa_last_ns,
+                    mmpbsa_membrane_thickness_angstrom=args.mmpbsa_membrane_thickness_angstrom,
+                    mmpbsa_membrane_dielectric=args.mmpbsa_membrane_dielectric,
+                    analysis_stride=args.analysis_stride,
+                    mmpbsa_decomposition=args.mmpbsa_decomposition,
+                    distance_pairs=args.distance_pair,
+                )
+                break
+
+            if stage_index + 1 < len(stages):
+                next_stage = stages[stage_index + 1]
+                if stage["ensemble"] == "nvt" and next_stage["ensemble"] == "npt":
+                    simulation.system.addForce(make_barostat(args))
+                    simulation.context.reinitialize(preserveState=True)
+                set_restraint_strengths(simulation.context, next_stage["restraints"])
+                diagnostic_reporter.previous_energy_kj_mol = None
+                checkpoint(next_stage["name"])
 
     except Exception as error:
         logger.exception("Simulation failed")

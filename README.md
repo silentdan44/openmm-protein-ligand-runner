@@ -6,10 +6,10 @@ Dockerized molecular-dynamics workflow for a protein–ligand complex. It can pr
 
 | Inputs | Use in this repository |
 | --- | --- |
-| AQP3 + ligand | Smaller end-to-end membrane smoke test. AQP3 is a multipass membrane aquaglyceroporin, so use the membrane workflow for a physically representative setup. [UniProt: AQP3](https://www.uniprot.org/uniprotkb/A0A2R8Y2R4/entry) |
-| TRPV4 + capsaicin | Larger channel–ligand reference case for optional, more demanding membrane validation. It is not needed for the quick smoke test. |
+| AQP3 + ligand | Smaller end-to-end membrane validation system. AQP3 is a multipass membrane aquaglyceroporin, so use the membrane workflow for a physically representative setup. [UniProt: AQP3](https://www.uniprot.org/uniprotkb/A0A2R8Y2R4/entry) |
+| TRPV4 + capsaicin | Larger channel–ligand reference case for optional, more demanding membrane validation. It is not needed for the AQP3 example. |
 
-The short AQP3 command below checks that preparation, membrane construction, dynamics, and analysis run. Its few picoseconds of production are not suitable for scientific conclusions.
+The AQP3 command below uses a short production segment but still runs the full fixed 1.5 ns equilibration. It checks preparation, membrane construction, dynamics, and analysis; its few picoseconds of production are not suitable for scientific conclusions.
 
 ## Build and compute platform
 
@@ -23,7 +23,7 @@ The image includes OpenMM's CPU, OpenCL, and CUDA support. It can be built witho
 
 TmDet runs locally in the container. It downloads the wwPDB Chemical Component Dictionary to `/work/data/ccd`; allow network access and writable container storage. With `docker run --rm`, this download is repeated for each new container unless that directory is persisted.
 
-## Quick start: AQP3 membrane smoke test
+## Example: AQP3 membrane run
 
 ```bash
 mkdir -p "$HOME/openmm-protein-ligand-results"
@@ -35,7 +35,7 @@ docker run --rm \
   --output /results --platform auto \
   --membrane --orientation tmdet --lipid-type POPC \
   --membrane-padding-nm 1.0 --ionic-strength-molar 0.15 \
-  --nvt-steps 1000 --npt-steps 1000 --prod-steps 2000 \
+  --prod-steps 2000 \
   --minimize-iterations 500 --report-interval 200 \
   --xtc-interval 200 --checkpoint-interval 1000 \
   --analysis-stride 1 \
@@ -44,11 +44,29 @@ docker run --rm \
 
 `Modeller.addMembrane()` builds both lipid leaflets and adds water and ions; do not add solvent separately. Membrane mode uses Amber ff14SB, Lipid17, TIP3P, and OpenFF ligand parameters. The first version supports one lipid type per bilayer: `POPC`, `POPE`, `DLPC`, `DLPE`, `DMPC`, `DOPC`, or `DPPC`.
 
+## Equilibration protocol
+
+The runner selects a fixed equilibration schedule from `--membrane`. Both schedules minimize with positional restraints, run two 250 ps NVT stages and four 250 ps NPT stages, then continue into production without restraints. Equilibration durations are fixed in physical time and converted to steps using `--timestep-fs`; there are no NVT/NPT step-count flags. Only production length is configured with `--prod-steps`.
+
+Restraint constants are in kJ mol⁻¹ nm⁻². Protein groups contain heavy atoms only: backbone (`N`, `CA`, `C`, `O`, `OXT`) and side chain. All ligands share a schedule on their heavy atoms.
+
+| Stage | Protein–ligand in water: BB / SC / ligand | Water + membrane: BB / SC / ligand / lipid P-Z |
+| --- | ---: | ---: |
+| Minimization | 1000 / 1000 / 1000 | 1000 / 1000 / 1000 / 1000 |
+| NVT 1 | 1000 / 1000 / 1000 | 1000 / 1000 / 1000 / 1000 |
+| NVT 2 | 500 / 500 / 500 | 500 / 500 / 500 / 500 |
+| NPT 1 | 500 / 250 / 500 | 500 / 250 / 500 / 500 |
+| NPT 2 | 250 / 100 / 250 | 250 / 100 / 250 / 250 |
+| NPT 3 | 100 / 50 / 100 | 100 / 50 / 100 / 100 |
+| NPT 4 and production | 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+
+`Lipid P-Z` restrains lipid phosphorus atoms only along the membrane-normal Z axis. Membrane NPT uses the membrane barostat with isotropic XY scaling, free Z, and zero surface tension. The schedule is a starting protocol; inspect the membrane geometry and simulation observables and extend equilibration when they continue to drift.
+
 For a larger TRPV4 run, replace the two fixture paths with `trpv4_receptor.pdb` and `trpv4_ligand.sdf`. TRPV4 is much larger and can require substantially more memory and runtime, especially for membrane construction on CPU.
 
 ## Inputs and membrane orientation
 
-Mount custom receptor and ligand files read-only, then pass their container paths with `--receptor` and `--ligand`. Repeat `--ligand` once per molecule to simulate a shared protein complex containing several ligands. Each SDF must contain exactly one molecule with a 3D conformer in the receptor's coordinate frame. All ligands are parameterized and restrained together; ligand interaction metrics in the report aggregate across them.
+Mount custom receptor and ligand files read-only, then pass their container paths with `--receptor` and `--ligand`. Repeat `--ligand` once per molecule to simulate a shared protein complex containing several ligands. Each SDF must contain exactly one molecule with a 3D conformer in the receptor's coordinate frame. All ligands are parameterized and receive the same staged restraint schedule; ligand interaction metrics in the report aggregate across them.
 
 ```bash
 --receptor /inputs/receptor.pdb \
