@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import platform as host_platform
 import random
 import shutil
 import subprocess
@@ -436,6 +437,67 @@ def get_platform(requested):
     raise RuntimeError(f"Requested OpenMM platform {requested} could not initialize: " + "; ".join(failures))
 
 
+def execution_environment(requested_platform, platform, properties):
+    """Collect best-effort runtime details useful for reproducing a run."""
+    platform_details = {}
+    try:
+        probe_system = mm.System()
+        probe_system.addParticle(1.0 * u.dalton)
+        probe_integrator = mm.VerletIntegrator(0.001 * u.picoseconds)
+        probe_context = mm.Context(probe_system, probe_integrator, platform, properties)
+        for name in platform.getPropertyNames():
+            try:
+                platform_details[name] = platform.getPropertyValue(probe_context, name)
+            except Exception:
+                platform_details[name] = None
+        del probe_context
+        del probe_integrator
+    except Exception:
+        logger.debug("Could not collect OpenMM platform properties", exc_info=True)
+    details = {
+        "requested_platform": requested_platform,
+        "openmm_platform": platform.getName(),
+        "platform_properties": dict(properties),
+        "platform_runtime_properties": platform_details,
+        "python": sys.version.split()[0],
+        "openmm": mm.__version__,
+        "os": host_platform.platform(),
+        "machine": host_platform.machine(),
+        "processor": host_platform.processor() or None,
+        "logical_cpu_count": os.cpu_count(),
+        "thread_environment": {
+            name: os.environ[name]
+            for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
+            if name in os.environ
+        },
+    }
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,name,driver_version", "--format=csv,noheader"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        details["nvidia_gpus"] = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except (OSError, subprocess.SubprocessError):
+        details["nvidia_gpus"] = None
+    return details
+
+
+def record_execution_environment(path, environment, resume):
+    """Save initial hardware/software details and append details for each resume."""
+    path = Path(path)
+    if resume and path.is_file():
+        record = json.loads(path.read_text())
+        record.setdefault("resume_sessions", []).append(environment)
+    else:
+        record = {"initial": environment, "resume_sessions": []}
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
 def sha256_file(path):
     digest = hashlib.sha256()
     with open(path, "rb") as source:
@@ -634,8 +696,6 @@ def main():
         checkpoint_path = output_dir / previous_progress.get("checkpoint", "")
         if not checkpoint_path.is_file():
             raise SystemExit(f"Cannot resume: checkpoint file is missing: {checkpoint_path}")
-        if previous_progress["configuration"] != config:
-            raise SystemExit("Cannot resume: input files or simulation settings differ from checkpoint run")
         valid_phases = {"nvt1", "nvt2", "npt1", "npt2", "npt3", "npt4", "prod", "complete"}
         if previous_progress["phase"] not in valid_phases:
             raise SystemExit(f"Cannot resume: invalid run phase {previous_progress['phase']!r}")
@@ -664,6 +724,11 @@ def main():
             raise ValueError("Requested platform differs from the checkpoint platform")
     platform, platform_properties = get_platform(current_platform)
     logger.info("Using OpenMM platform %s", platform.getName())
+    environment = execution_environment(args.platform, platform, platform_properties)
+    if resume and previous_progress["configuration"] != config:
+        raise SystemExit("Cannot resume: input files or simulation settings differ from checkpoint run")
+    record_execution_environment(output_dir / "run_environment.json", environment, resume)
+    logger.info("Execution environment: %s", json.dumps(environment, sort_keys=True))
 
     diagnostic_reporter = None
     current_phase = "preparation"

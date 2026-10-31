@@ -9,6 +9,7 @@ import logging
 import math
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .analysis_metrics import trajectory_metrics
@@ -234,12 +235,12 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
     return mmpbsa_dir
 
 
-def analyze_run(output_dir, config, *, perform_mmpbsa=False, mmpbsa_model="gb",
+def analyze_run(output_dir, config, *, analysis_dir=None, preliminary_phase=None, perform_mmpbsa=False, mmpbsa_model="gb",
                 mmpbsa_interval=1, mmpbsa_last_ns=None, mmpbsa_membrane_thickness_angstrom=None,
                 mmpbsa_membrane_dielectric=7.0, mmpbsa_decomposition=False,
                 analysis_stride=10, distance_pairs=None):
     output_dir = Path(output_dir)
-    analysis_dir = output_dir / "analysis"
+    analysis_dir = Path(analysis_dir) if analysis_dir is not None else output_dir / "analysis"
     analysis_dir.mkdir(parents=True, exist_ok=True)
     for name in PLOT_FILES:
         (analysis_dir / name).unlink(missing_ok=True)
@@ -247,6 +248,8 @@ def analyze_run(output_dir, config, *, perform_mmpbsa=False, mmpbsa_model="gb",
         (analysis_dir / name).unlink(missing_ok=True)
 
     warnings = []
+    if preliminary_phase is not None:
+        warnings.append(f"PRELIMINARY report: snapshot taken during phase {preliminary_phase}; results may change as the simulation continues.")
     state_rows = read_state_data(output_dir / "state_data.csv")
     trajectory_data = None
     trajectory_path = output_dir / "trajectory.xtc"
@@ -274,6 +277,8 @@ def analyze_run(output_dir, config, *, perform_mmpbsa=False, mmpbsa_model="gb",
         warnings.append(f"Residue-distance graph skipped: {trajectory_data['distance_pair_warning']}")
 
     metrics = {
+        "preliminary": preliminary_phase is not None,
+        "snapshot_phase": preliminary_phase,
         "frame_count": trajectory_data["frame_count"] if trajectory_data else 0,
         "analysis_stride": trajectory_data["analysis_stride"] if trajectory_data else analysis_stride,
         "production_start_ns": trajectory_data["production_start_ns"] if trajectory_data else None,
@@ -320,9 +325,59 @@ def analyze_run(output_dir, config, *, perform_mmpbsa=False, mmpbsa_model="gb",
     return analysis_dir
 
 
+def analyze_snapshot(output_dir, config, phase, *, analysis_stride=10, distance_pairs=None):
+    """Analyze a bounded copy of a live run without modifying its output files."""
+    output_dir = Path(output_dir)
+    with tempfile.TemporaryDirectory(prefix="md-preview-") as directory:
+        snapshot = Path(directory)
+        topology = output_dir / "system_final.pdb"
+        if topology.is_file():
+            shutil.copyfile(topology, snapshot / topology.name)
+        state_path = output_dir / "state_data.csv"
+        if state_path.is_file():
+            with state_path.open("rb") as source:
+                data = source.read(state_path.stat().st_size)
+            # A reporter may be writing its last row while the copy is made.
+            (snapshot / state_path.name).write_bytes(data[:data.rfind(b"\n") + 1])
+        trajectory = output_dir / "trajectory.xtc"
+        if trajectory.is_file() and trajectory.stat().st_size:
+            import mdtraj as md
+
+            raw = snapshot / "raw.xtc"
+            with trajectory.open("rb") as source, raw.open("wb") as target:
+                remaining = trajectory.stat().st_size
+                while remaining:
+                    block = source.read(min(1024 * 1024, remaining))
+                    if not block:
+                        break
+                    target.write(block)
+                    remaining -= len(block)
+            # A snapshot can end in a partially written frame. Keep complete
+            # frames only; the live trajectory is never opened for writing.
+            try:
+                with md.formats.XTCTrajectoryFile(str(raw), "r") as reader:
+                    with md.formats.XTCTrajectoryFile(str(snapshot / "trajectory.xtc"), "w") as writer:
+                        while True:
+                            try:
+                                xyz, time, step, box = reader.read(n_frames=1)
+                            except (EOFError, OSError, RuntimeError, ValueError) as error:
+                                logger.warning("Discarding incomplete final XTC frame: %s", error)
+                                break
+                            if len(xyz) == 0:
+                                break
+                            writer.write(xyz, time=time, step=step, box=box)
+            except (EOFError, OSError, RuntimeError, ValueError) as error:
+                logger.warning("Trajectory snapshot unavailable: %s", error)
+        return analyze_run(snapshot, config, analysis_dir=output_dir / "analysis_preview",
+                           preliminary_phase=phase, analysis_stride=analysis_stride,
+                           distance_pairs=distance_pairs)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default="output", help="Completed OpenMM run directory")
+    parser.add_argument("--preview", action="store_true",
+                        help="Analyze a snapshot of an ongoing run in analysis_preview")
     parser.add_argument("--mmpbsa", action="store_true", help="Also run gmx_MMPBSA")
     parser.add_argument("--mmpbsa-model", choices=("gb", "pb", "pb_mem"), default="gb")
     parser.add_argument("--mmpbsa-interval", type=int, default=1)
@@ -337,6 +392,8 @@ def main():
                         metavar=("CHAIN:RESID", "CHAIN:RESID"),
                         help="Plot Cα distance between two residues; repeat to add pairs")
     args = parser.parse_args()
+    if args.preview and args.mmpbsa:
+        parser.error("--preview cannot be combined with --mmpbsa")
     if args.mmpbsa_interval < 1:
         parser.error("--mmpbsa-interval must be a positive integer")
     if args.mmpbsa_last_ns is not None and (
@@ -369,6 +426,12 @@ def main():
         parser.error("pb_mem requires a completed membrane run")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    if args.preview:
+        result = analyze_snapshot(output_dir, config, state.get("phase", "unknown"),
+                                  analysis_stride=args.analysis_stride,
+                                  distance_pairs=args.distance_pair)
+        print(f"Preliminary analysis report: {result / 'report.html'}")
+        return
     result = analyze_run(
         output_dir, config, perform_mmpbsa=args.mmpbsa,
         mmpbsa_model=args.mmpbsa_model, mmpbsa_interval=args.mmpbsa_interval,

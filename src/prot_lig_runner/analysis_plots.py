@@ -423,6 +423,8 @@ def build_report(output_dir, metrics, generated_plots, *, warnings=None):
         "<style>body{font:16px system-ui;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#172033}"
         "img{border:1px solid #dbe2ea;border-radius:8px;max-width:100%}section{margin:2rem 0}</style>",
         "<h1>Protein–ligand MD analysis</h1>",
+        "<p><strong>PRELIMINARY REPORT</strong> — simulation is ongoing; results may change.</p>"
+        if metrics.get("preliminary") else "",
         f"<p>Production frames analyzed: {metrics.get('frame_count', 0)}; "
         f"state samples: {metrics.get('state_sample_count', 0)}.</p>",
         f"<ul>{summary_items}</ul>" if summary_items else "",

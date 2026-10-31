@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from prot_lig_runner.analysis import (
+    analyze_snapshot,
     read_state_data,
     run_mmpbsa,
     write_index_file,
@@ -12,6 +13,28 @@ from prot_lig_runner.analysis import (
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_snapshot_copies_complete_state_rows_without_touching_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state_data.csv"
+            original = b"Step,Temperature (K)\n10,300\n20,30"
+            state.write_bytes(original)
+            (root / "system_final.pdb").write_text("topology")
+            (root / "analysis").mkdir()
+            (root / "analysis" / "report.html").write_text("final")
+
+            def inspect_snapshot(snapshot, config, **kwargs):
+                self.assertEqual((snapshot / "state_data.csv").read_bytes(), b"Step,Temperature (K)\n10,300\n")
+                self.assertEqual((snapshot / "system_final.pdb").read_text(), "topology")
+                self.assertEqual(kwargs["preliminary_phase"], "prod")
+                self.assertEqual(kwargs["analysis_dir"], root / "analysis_preview")
+                return kwargs["analysis_dir"]
+
+            with patch("prot_lig_runner.analysis.analyze_run", side_effect=inspect_snapshot):
+                self.assertEqual(analyze_snapshot(root, {}, "prod"), root / "analysis_preview")
+            self.assertEqual(state.read_bytes(), original)
+            self.assertEqual((root / "analysis" / "report.html").read_text(), "final")
+
     def test_reads_reporter_csv(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state_data.csv"

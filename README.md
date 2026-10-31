@@ -82,7 +82,7 @@ The runner validates input files and simulation counts before starting. Configur
 
 ## Results, validation, and restart
 
-The output directory contains `system_final.pdb`, `trajectory.xtc`, `state_data.csv`, `run_state.json`, checkpoints, and `final_state.xml` after completion. Analysis writes `analysis/report.html`, `analysis/metrics.json`, `analysis/time_series.csv`, plots, and available ligand-contact, hydrogen-bond, and residue-distance tables.
+The output directory contains `system_final.pdb`, `trajectory.xtc`, `state_data.csv`, `run_state.json`, `run_environment.json`, checkpoints, and `final_state.xml` after completion. `run_environment.json` records the selected OpenMM platform and its properties, Python/OpenMM versions, OS and CPU details, thread-related environment variables, and NVIDIA GPU/driver details when `nvidia-smi` is available. Resumed sessions are recorded separately. Analysis writes `analysis/report.html`, `analysis/metrics.json`, `analysis/time_series.csv`, plots, and available ligand-contact, hydrogen-bond, and residue-distance tables.
 
 The report includes simulation QC, protein stability and RMSF, ligand pose and pocket contacts, contact and hydrogen-bond occupancy, selected Cα–Cα residue distances, and membrane metrics when applicable. Optional metrics are omitted with a note when their data is unavailable.
 
@@ -139,6 +139,19 @@ docker run --rm --entrypoint python \
   openmm-protein-ligand-runner:latest \
   -m prot_lig_runner.analysis --output /results --mmpbsa
 ```
+
+### Preliminary report during a run
+
+While the simulation container is running, start a second container with the same results directory mounted and request a snapshot:
+
+```bash
+docker run --rm --entrypoint python \
+  -v "$HOME/openmm-protein-ligand-results:/results" \
+  openmm-protein-ligand-runner:latest \
+  -m prot_lig_runner.analysis --output /results --preview --analysis-stride 10
+```
+
+Open `analysis_preview/report.html`. Repeat the command to refresh it; the final `analysis/` report is separate. The preview copies the data available at invocation and discards any incomplete last trajectory frame. QC plots can include equilibration, while trajectory metrics use production frames only, so they appear after production has started and frames have been saved. The report marks its phase and preliminary status; conclusions can change as sampling grows. `--distance-pair` can override the pairs saved with the run. MMPBSA is not run in preview mode. For a consistent snapshot, do not resume or restart the simulation while the preview is copying files.
 
 ## Diagnostics and tests
 
