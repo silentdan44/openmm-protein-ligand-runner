@@ -584,6 +584,63 @@ def save_checkpoint_atomically(simulation, path):
     simulation.saveCheckpoint(str(temporary))
     temporary.replace(path)
 
+def serialize_xml_atomic(object_to_serialize, path):
+    """Serialize an OpenMM object to XML via a temporary file and atomic rename."""
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(mm.XmlSerializer.serialize(object_to_serialize))
+    temporary.replace(path)
+
+
+def serialized_system_path(checkpoint_path):
+    """Map a phase checkpoint file to its serialized System file.
+
+    The force list changes only at the NVT->NPT transition (barostat added);
+    restraint strengths are context parameters stored in checkpoints, so one
+    serialized System per ensemble is sufficient for an exact resume.
+    """
+    name = checkpoint_path.name
+    if not (name.startswith("checkpoint-") and name.endswith(".chk")):
+        raise ValueError(f"Unrecognized checkpoint file name: {name}")
+    stage = name[len("checkpoint-"):-len(".chk")]
+    if stage.startswith("nvt"):
+        ensemble = "nvt"
+    elif stage.startswith("npt"):
+        ensemble = "npt"
+    elif stage in {"prod", "complete"}:
+        ensemble = "prod"
+    else:
+        raise ValueError(f"Cannot map checkpoint stage {stage!r} to a serialized System")
+    return checkpoint_path.with_name(f"system-{ensemble}.xml")
+
+
+def load_serialized_resume(checkpoint_path, integrator_path, topology_path, platform, platform_properties):
+    """Rebuild a Simulation from serialized artifacts without rebuilding the chemistry.
+
+    Rebuilding solvent on resume is not bit-reproducible (Modeller does not expose
+    a seed for water/ion placement), so a rebuilt System can have a different
+    particle count and the checkpoint then refuses to load. Loading the serialized
+    System and Integrator guarantees the checkpoint matches exactly; positions,
+    velocities, step count, and restraint strengths are restored from the
+    checkpoint itself.
+    """
+    system_path = serialized_system_path(checkpoint_path)
+    for artifact in (system_path, integrator_path, topology_path):
+        if not artifact.is_file():
+            raise FileNotFoundError(f"Cannot resume: missing serialized artifact {artifact}")
+    pdb = app.PDBFile(str(topology_path))
+    system = mm.XmlSerializer.deserialize(Path(system_path).read_text())
+    integrator = mm.XmlSerializer.deserialize(Path(integrator_path).read_text())
+    num_topology_atoms = sum(1 for _ in pdb.topology.atoms())
+    if num_topology_atoms != system.getNumParticles():
+        raise ValueError(
+            f"Cannot resume: {topology_path} describes {num_topology_atoms} atoms but "
+            f"{system_path} contains {system.getNumParticles()} particles"
+        )
+    simulation = app.Simulation(pdb.topology, system, integrator, platform, platform_properties)
+    simulation.loadCheckpoint(str(checkpoint_path))
+    return simulation
+
+
 
 class AtomicCheckpointReporter:
     """Write periodic checkpoints atomically so interruption preserves the prior one."""
@@ -609,17 +666,23 @@ def truncate_state_data_to_step(path, checkpoint_step):
     temporary = path.with_name(path.name + ".resume.tmp")
     kept = 0
     with path.open(newline="") as source:
-        reader = csv.DictReader(source)
-        if not reader.fieldnames or "Step" not in reader.fieldnames:
+        header_line = source.readline()
+        if not header_line:
+            return 0
+        header = next(csv.reader([header_line]))
+        # StateDataReporter headers are comment-prefixed and quoted ('#"Step"'),
+        # so match column names on their normalized form and keep the header line
+        # verbatim when rewriting.
+        fieldnames = [name.lstrip("#").strip().strip('"') for name in header]
+        if "Step" not in fieldnames:
             raise ValueError(f"Cannot safely resume: {path} has no Step column")
+        step_column = fieldnames.index("Step")
         with temporary.open("w", newline="") as target:
-            writer = csv.DictWriter(
-                target, fieldnames=reader.fieldnames, extrasaction="ignore"
-            )
-            writer.writeheader()
-            for row in reader:
+            target.write(header_line)
+            writer = csv.writer(target)
+            for row in csv.reader(source):
                 try:
-                    row_step = float(row["Step"])
+                    row_step = float(row[step_column])
                 except (TypeError, ValueError):
                     continue
                 if row_step <= checkpoint_step:
@@ -671,6 +734,256 @@ def package_version(name):
 
 def derived_seed(seed, offset):
     return (seed + offset - 1) % 2_147_483_647 + 1
+
+
+def build_simulation(
+    args, receptor_path, ligand_paths, output_dir, platform, platform_properties,
+    resume_checkpoint, add_barostat,
+):
+    """Build the solvated system from inputs and create a Simulation.
+
+    With resume_checkpoint=None this minimizes and randomizes velocities for a
+    fresh run. Otherwise the legacy path rebuilds the chemistry and loads that
+    checkpoint; because rebuilt solvent is not bit-reproducible, prefer resuming
+    from the serialized artifacts written at phase checkpoints.
+    """
+    ligands = []
+    for ligand_path in ligand_paths:
+        logger.info("Loading ligand from %s", ligand_path)
+        loaded = Molecule.from_file(str(ligand_path))
+        if isinstance(loaded, list):
+            if len(loaded) != 1:
+                raise ValueError(f"Each ligand SDF must contain exactly one molecule; found {len(loaded)} in {ligand_path}")
+            loaded = loaded[0]
+        if loaded.n_atoms == 0 or not loaded.conformers:
+            raise ValueError(f"Ligand SDF must contain atoms and at least one 3D conformer: {ligand_path}")
+        ligands.append(loaded)
+
+    logger.info("Preparing receptor %s with PDBFixer", receptor_path)
+    fixer = PDBFixer(filename=str(receptor_path))
+    ligand_topologies = [Topology.from_molecules([ligand]).to_openmm() for ligand in ligands]
+    ligand_positions = [off_to_omm(ligand.conformers[0]) for ligand in ligands]
+    if args.membrane:
+        fixer.positions, ligand_positions = prepare_membrane_orientation(
+            args, fixer, ligand_positions, receptor_path, output_dir
+        )
+        logger.info("Membrane orientation mode: %s", args.orientation)
+    modeller = app.Modeller(fixer.topology, fixer.positions)
+    hydrogens = [atom for atom in modeller.topology.atoms() if atom.element.symbol == "H"]
+    modeller.delete(hydrogens)
+    fixer.topology, fixer.positions = modeller.topology, modeller.positions
+
+    fixer.findMissingResidues()
+    fixer.findNonstandardResidues()
+    fixer.replaceNonstandardResidues()
+    fixer.findMissingAtoms()
+    fixer.addMissingAtoms(seed=derived_seed(args.seed, 3))
+
+    smirnoff = SMIRNOFFTemplateGenerator(molecules=ligands)
+    forcefield_files = [PROTEIN_FF]
+    if args.membrane:
+        forcefield_files.append("amber14/lipid17.xml")
+    forcefield_files.append(WATER_FF)
+    forcefield = app.ForceField(*forcefield_files)
+    forcefield.registerTemplateGenerator(smirnoff.generator)
+    modeller = app.Modeller(fixer.topology, fixer.positions)
+
+    for ligand_topology, positions in zip(ligand_topologies, ligand_positions):
+        for residue in ligand_topology.residues():
+            residue.name = "LIG"
+        modeller.add(ligand_topology, positions)
+
+    logger.info("Adding hydrogens and %s", "membrane plus water" if args.membrane else "solvent")
+    python_rng_state = random.getstate()
+    random.seed(args.seed)
+    try:
+        modeller.addHydrogens(forcefield=forcefield, pH=7.0)
+        if args.membrane:
+            modeller.addMembrane(
+                forcefield,
+                lipidType=args.lipid_type,
+                membraneCenterZ=args.membrane_center_z_nm * u.nanometer,
+                minimumPadding=args.membrane_padding_nm * u.nanometer,
+                ionicStrength=args.ionic_strength_molar * u.molar,
+            )
+        else:
+            modeller.addSolvent(
+                forcefield,
+                padding=args.padding_nm * u.nanometer,
+                ionicStrength=args.ionic_strength_molar * u.molar,
+            )
+    finally:
+        random.setstate(python_rng_state)
+
+    if args.membrane:
+        residues = list(modeller.topology.residues())
+        lipid_residue_names = {args.lipid_type, args.lipid_type[:3]}
+        lipid_residues = [residue for residue in residues if residue.name in lipid_residue_names]
+        water_residues = [residue for residue in residues if residue.name in {"HOH", "WAT", "SOL"}]
+        if len(lipid_residues) < 10 or not water_residues:
+            raise ValueError(
+                f"Membrane builder produced {len(lipid_residues)} {args.lipid_type} residues and "
+                f"{len(water_residues)} waters; expected a membrane and solvated system"
+            )
+        logger.info(
+            "Built membrane system: %d %s lipids, %d water residues, box=%s",
+            len(lipid_residues), args.lipid_type, len(water_residues),
+            modeller.topology.getPeriodicBoxVectors(),
+        )
+        geometry = membrane_geometry_summary(
+            modeller.topology, modeller.positions, args.lipid_type, args.membrane_center_z_nm
+        )
+        lipid_leaflets = geometry["lipid_leaflets"]
+        if not lipid_leaflets["below_center_heavy_atoms"] or not lipid_leaflets["above_center_heavy_atoms"]:
+            raise ValueError("Membrane builder did not produce lipid atoms in both leaflets")
+        protein_z = geometry["protein"]["z_range_nm"]
+        if protein_z is None or not protein_z[0] < args.membrane_center_z_nm < protein_z[1]:
+            raise ValueError("The receptor does not span the requested membrane center plane")
+        ligand_distance = geometry.get("minimum_ligand_protein_heavy_distance_nm")
+        if ligand_distance is None or ligand_distance > 0.8:
+            raise ValueError(
+                "The transformed ligand is not near the receptor "
+                f"(minimum heavy-atom distance {ligand_distance} nm)"
+            )
+        box_vectors = modeller.topology.getPeriodicBoxVectors()
+        geometry["box_vectors_nm"] = [
+            [float(value) for value in vector.value_in_unit(u.nanometer)] for vector in box_vectors
+        ]
+        (output_dir / "membrane_geometry.json").write_text(json.dumps(geometry, indent=2) + "\n")
+        logger.info(
+            "Membrane geometry: protein z=%s nm, lipid z=%s nm, minimum ligand-protein distance=%.3f nm",
+            geometry["protein"]["z_range_nm"], geometry["lipid"]["z_range_nm"], ligand_distance,
+        )
+
+    with open(output_dir / "system_final.pdb", "w") as pdb_file:
+        app.PDBFile.writeFile(modeller.topology, modeller.positions, pdb_file)
+
+    system = forcefield.createSystem(
+        modeller.topology,
+        nonbondedMethod=app.PME,
+        nonbondedCutoff=1.0 * u.nanometer,
+        constraints=app.HBonds,
+    )
+    initial_overlaps = find_severe_overlaps(modeller.topology, modeller.positions)
+    if initial_overlaps:
+        logger.warning(
+            "Found %d possible severe nonbonded close contacts in prepared coordinates; "
+            "the first pairs are included in failure_diagnostics.json: %s",
+            len(initial_overlaps), json.dumps(initial_overlaps),
+        )
+    for index, residue in enumerate(modeller.topology.residues()):
+        residue.id = str(index + 1)
+
+    if args.mmpbsa:
+        logger.info("Exporting protein-ligand-only topology for MMPBSA; membrane and solvent stay implicit")
+        export_mmpbsa_complex(forcefield, modeller, output_dir, PROTEIN_RESIDUES)
+    elif args.skip_gromacs_export:
+        logger.info("Skipping GROMACS export as requested")
+    else:
+        # Keep constrained H-X bonds in OpenMM dynamics, but include them
+        # in the exported topology so ParmEd can construct Amber radii.
+        enable_batched_openmm_topology_conversion()
+        topology_system = forcefield.createSystem(
+            modeller.topology,
+            nonbondedMethod=app.PME,
+            nonbondedCutoff=1.0 * u.nanometer,
+            constraints=None,
+        )
+        interchange = Interchange.from_openmm(
+            topology=modeller.topology, system=topology_system, positions=modeller.positions
+        )
+        if modeller.topology.getPeriodicBoxVectors():
+            interchange.box = modeller.topology.getPeriodicBoxVectors()
+        interchange.to_top(str(output_dir / "system.top"))
+        interchange.to_gro(str(output_dir / "system.gro"))
+
+    protein_indices = [
+        atom.index for atom in modeller.topology.atoms() if atom.residue.name in PROTEIN_RESIDUES
+    ]
+    ligand_indices = [atom.index for atom in modeller.topology.atoms() if atom.residue.name == "LIG"]
+    if not protein_indices:
+        raise ValueError("No standard protein residues found; cannot apply protein restraints")
+    if not ligand_indices:
+        raise ValueError("No LIG residue found; cannot apply ligand restraints")
+    protein_atoms = [
+        atom for atom in modeller.topology.atoms()
+        if atom.residue.name in PROTEIN_RESIDUES
+        and atom.element is not None and atom.element.symbol != "H"
+    ]
+    backbone_names = {"N", "CA", "C", "O", "OXT"}
+    protein_bb_indices = [atom.index for atom in protein_atoms if atom.name.upper() in backbone_names]
+    protein_sc_indices = [atom.index for atom in protein_atoms if atom.name.upper() not in backbone_names]
+    ligand_heavy_indices = [
+        atom.index for atom in modeller.topology.atoms()
+        if atom.residue.name == "LIG" and atom.element is not None and atom.element.symbol != "H"
+    ]
+    if not protein_bb_indices:
+        raise ValueError("No protein backbone heavy atoms found; cannot apply protein restraints")
+    if not ligand_heavy_indices:
+        raise ValueError("No ligand heavy atoms found; cannot apply ligand restraints")
+    lipid_p_indices = []
+    if args.membrane:
+        lipid_residue_names = {args.lipid_type, args.lipid_type[:3]}
+        lipid_p_indices = [
+            atom.index for atom in modeller.topology.atoms()
+            if atom.residue.name in lipid_residue_names and atom.name.upper() == "P"
+        ]
+        if not lipid_p_indices:
+            raise ValueError("No lipid phosphorus atoms found; cannot apply membrane equilibration restraints")
+    raw_schedule = staged_equilibration_schedule(args.membrane)
+    initial_restraints = raw_schedule[0][2]
+    logger.info(
+        "Applying staged restraints to %d protein backbone heavy atoms, %d side-chain heavy atoms, "
+        "%d ligand heavy atoms%s",
+        len(protein_bb_indices), len(protein_sc_indices), len(ligand_heavy_indices),
+        f", and {len(lipid_p_indices)} lipid phosphorus atoms along Z" if args.membrane else "",
+    )
+    add_positional_restraints(
+        system, modeller.positions, protein_bb_indices, RESTRAINT_PARAMETERS["protein_bb"],
+        initial_restraints["protein_bb"],
+    )
+    add_positional_restraints(
+        system, modeller.positions, protein_sc_indices, RESTRAINT_PARAMETERS["protein_sc"],
+        initial_restraints["protein_sc"],
+    )
+    add_positional_restraints(
+        system, modeller.positions, ligand_heavy_indices, RESTRAINT_PARAMETERS["ligand"],
+        initial_restraints["ligand"],
+    )
+    if args.membrane:
+        add_positional_restraints(
+            system, modeller.positions, lipid_p_indices, RESTRAINT_PARAMETERS["lipid_pz"],
+            initial_restraints["lipid_pz"], axes=("z",),
+        )
+
+    if add_barostat:
+        system.addForce(make_barostat(args))
+
+    integrator = mm.LangevinMiddleIntegrator(
+        args.temperature_k * u.kelvin,
+        args.friction_per_ps / u.picosecond,
+        args.timestep_fs * u.femtoseconds,
+    )
+    integrator.setRandomNumberSeed(derived_seed(args.seed, 2))
+    serialize_xml_atomic(integrator, output_dir / "integrator.xml")
+    simulation = app.Simulation(
+        modeller.topology, system, integrator, platform, platform_properties
+    )
+    if resume_checkpoint is not None:
+        simulation.loadCheckpoint(str(resume_checkpoint))
+        logger.info(
+            "Loaded checkpoint %s at step %d",
+            resume_checkpoint.name, simulation.currentStep,
+        )
+    else:
+        simulation.context.setPositions(modeller.positions)
+        logger.info("Minimizing energy")
+        simulation.minimizeEnergy(maxIterations=args.minimize_iterations)
+        simulation.context.setVelocitiesToTemperature(
+            args.temperature_k * u.kelvin, derived_seed(args.seed, 0)
+        )
+
+    return simulation, initial_overlaps
 
 
 def main():
@@ -730,254 +1043,78 @@ def main():
     record_execution_environment(output_dir / "run_environment.json", environment, resume)
     logger.info("Execution environment: %s", json.dumps(environment, sort_keys=True))
 
+    if not resume:
+        checkpoint_path = output_dir / "checkpoint-nvt1.chk"
+
+    raw_schedule = staged_equilibration_schedule(args.membrane)
+    stage_steps = equilibration_stage_steps(args.timestep_fs)
+    schedule_steps = [stage_steps] * (len(raw_schedule) - 1) + [args.prod_steps]
+    stages = []
+    cumulative_steps = 0
+    for (stage_name, ensemble, strengths), step_count in zip(raw_schedule, schedule_steps):
+        cumulative_steps += step_count
+        stages.append({
+            "name": stage_name,
+            "ensemble": ensemble,
+            "restraints": strengths,
+            "end_step": cumulative_steps,
+        })
+    stage_names = [stage["name"] for stage in stages]
+    phase = previous_progress["phase"] if resume else "nvt1"
+    start_stage_index = stage_names.index(phase)
+
+    integrator_path = output_dir / "integrator.xml"
+    resume_system_path = None
+    if resume:
+        try:
+            resume_system_path = serialized_system_path(checkpoint_path)
+        except ValueError:
+            resume_system_path = None
+    serialized_resume_available = (
+        resume
+        and resume_system_path is not None
+        and resume_system_path.is_file()
+        and integrator_path.is_file()
+        and (output_dir / "system_final.pdb").is_file()
+    )
+
     diagnostic_reporter = None
     current_phase = "preparation"
     initial_overlaps = []
     try:
-        ligands = []
-        for ligand_path in ligand_paths:
-            logger.info("Loading ligand from %s", ligand_path)
-            loaded = Molecule.from_file(str(ligand_path))
-            if isinstance(loaded, list):
-                if len(loaded) != 1:
-                    raise ValueError(f"Each ligand SDF must contain exactly one molecule; found {len(loaded)} in {ligand_path}")
-                loaded = loaded[0]
-            if loaded.n_atoms == 0 or not loaded.conformers:
-                raise ValueError(f"Ligand SDF must contain atoms and at least one 3D conformer: {ligand_path}")
-            ligands.append(loaded)
-
-        logger.info("Preparing receptor %s with PDBFixer", receptor_path)
-        fixer = PDBFixer(filename=str(receptor_path))
-        ligand_topologies = [Topology.from_molecules([ligand]).to_openmm() for ligand in ligands]
-        ligand_positions = [off_to_omm(ligand.conformers[0]) for ligand in ligands]
-        if args.membrane:
-            fixer.positions, ligand_positions = prepare_membrane_orientation(
-                args, fixer, ligand_positions, receptor_path, output_dir
-            )
-            logger.info("Membrane orientation mode: %s", args.orientation)
-        modeller = app.Modeller(fixer.topology, fixer.positions)
-        hydrogens = [atom for atom in modeller.topology.atoms() if atom.element.symbol == "H"]
-        modeller.delete(hydrogens)
-        fixer.topology, fixer.positions = modeller.topology, modeller.positions
-
-        fixer.findMissingResidues()
-        fixer.findNonstandardResidues()
-        fixer.replaceNonstandardResidues()
-        fixer.findMissingAtoms()
-        fixer.addMissingAtoms(seed=derived_seed(args.seed, 3))
-
-        smirnoff = SMIRNOFFTemplateGenerator(molecules=ligands)
-        forcefield_files = [PROTEIN_FF]
-        if args.membrane:
-            forcefield_files.append("amber14/lipid17.xml")
-        forcefield_files.append(WATER_FF)
-        forcefield = app.ForceField(*forcefield_files)
-        forcefield.registerTemplateGenerator(smirnoff.generator)
-        modeller = app.Modeller(fixer.topology, fixer.positions)
-
-        for ligand_topology, positions in zip(ligand_topologies, ligand_positions):
-            for residue in ligand_topology.residues():
-                residue.name = "LIG"
-            modeller.add(ligand_topology, positions)
-
-        logger.info("Adding hydrogens and %s", "membrane plus water" if args.membrane else "solvent")
-        python_rng_state = random.getstate()
-        random.seed(args.seed)
-        try:
-            modeller.addHydrogens(forcefield=forcefield, pH=7.0)
-            if args.membrane:
-                modeller.addMembrane(
-                    forcefield,
-                    lipidType=args.lipid_type,
-                    membraneCenterZ=args.membrane_center_z_nm * u.nanometer,
-                    minimumPadding=args.membrane_padding_nm * u.nanometer,
-                    ionicStrength=args.ionic_strength_molar * u.molar,
-                )
-            else:
-                modeller.addSolvent(
-                    forcefield,
-                    padding=args.padding_nm * u.nanometer,
-                    ionicStrength=args.ionic_strength_molar * u.molar,
-                )
-        finally:
-            random.setstate(python_rng_state)
-
-        if args.membrane:
-            residues = list(modeller.topology.residues())
-            lipid_residue_names = {args.lipid_type, args.lipid_type[:3]}
-            lipid_residues = [residue for residue in residues if residue.name in lipid_residue_names]
-            water_residues = [residue for residue in residues if residue.name in {"HOH", "WAT", "SOL"}]
-            if len(lipid_residues) < 10 or not water_residues:
-                raise ValueError(
-                    f"Membrane builder produced {len(lipid_residues)} {args.lipid_type} residues and "
-                    f"{len(water_residues)} waters; expected a membrane and solvated system"
-                )
+        if serialized_resume_available:
             logger.info(
-                "Built membrane system: %d %s lipids, %d water residues, box=%s",
-                len(lipid_residues), args.lipid_type, len(water_residues),
-                modeller.topology.getPeriodicBoxVectors(),
+                "Resuming %s from serialized artifacts (%s, %s, system_final.pdb); "
+                "skipping the system rebuild",
+                previous_progress["phase"], resume_system_path.name, integrator_path.name,
             )
-            geometry = membrane_geometry_summary(
-                modeller.topology, modeller.positions, args.lipid_type, args.membrane_center_z_nm
+            simulation = load_serialized_resume(
+                checkpoint_path,
+                integrator_path,
+                output_dir / "system_final.pdb",
+                platform,
+                platform_properties,
             )
-            lipid_leaflets = geometry["lipid_leaflets"]
-            if not lipid_leaflets["below_center_heavy_atoms"] or not lipid_leaflets["above_center_heavy_atoms"]:
-                raise ValueError("Membrane builder did not produce lipid atoms in both leaflets")
-            protein_z = geometry["protein"]["z_range_nm"]
-            if protein_z is None or not protein_z[0] < args.membrane_center_z_nm < protein_z[1]:
-                raise ValueError("The receptor does not span the requested membrane center plane")
-            ligand_distance = geometry.get("minimum_ligand_protein_heavy_distance_nm")
-            if ligand_distance is None or ligand_distance > 0.8:
-                raise ValueError(
-                    "The transformed ligand is not near the receptor "
-                    f"(minimum heavy-atom distance {ligand_distance} nm)"
+        else:
+            if resume:
+                logger.info(
+                    "Serialized resume artifacts not found; rebuilding the system from inputs. "
+                    "Solvent placement is not seedable, so the rebuilt particle count can differ "
+                    "and the checkpoint may refuse to load"
                 )
-            box_vectors = modeller.topology.getPeriodicBoxVectors()
-            geometry["box_vectors_nm"] = [
-                [float(value) for value in vector.value_in_unit(u.nanometer)] for vector in box_vectors
-            ]
-            (output_dir / "membrane_geometry.json").write_text(json.dumps(geometry, indent=2) + "\n")
-            logger.info(
-                "Membrane geometry: protein z=%s nm, lipid z=%s nm, minimum ligand-protein distance=%.3f nm",
-                geometry["protein"]["z_range_nm"], geometry["lipid"]["z_range_nm"], ligand_distance,
+            simulation, initial_overlaps = build_simulation(
+                args,
+                receptor_path,
+                ligand_paths,
+                output_dir,
+                platform,
+                platform_properties,
+                checkpoint_path if resume else None,
+                stages[start_stage_index]["ensemble"] == "npt",
             )
+        system = simulation.system
 
-        with open(output_dir / "system_final.pdb", "w") as pdb_file:
-            app.PDBFile.writeFile(modeller.topology, modeller.positions, pdb_file)
-
-        system = forcefield.createSystem(
-            modeller.topology,
-            nonbondedMethod=app.PME,
-            nonbondedCutoff=1.0 * u.nanometer,
-            constraints=app.HBonds,
-        )
-        initial_overlaps = find_severe_overlaps(modeller.topology, modeller.positions)
-        if initial_overlaps:
-            logger.warning(
-                "Found %d possible severe nonbonded close contacts in prepared coordinates; "
-                "the first pairs are included in failure_diagnostics.json: %s",
-                len(initial_overlaps), json.dumps(initial_overlaps),
-            )
-        for index, residue in enumerate(modeller.topology.residues()):
-            residue.id = str(index + 1)
-
-        if args.mmpbsa:
-            logger.info("Exporting protein-ligand-only topology for MMPBSA; membrane and solvent stay implicit")
-            export_mmpbsa_complex(forcefield, modeller, output_dir, PROTEIN_RESIDUES)
-        elif args.skip_gromacs_export:
-            logger.info("Skipping GROMACS export as requested")
-        else:
-            # Keep constrained H-X bonds in OpenMM dynamics, but include them
-            # in the exported topology so ParmEd can construct Amber radii.
-            enable_batched_openmm_topology_conversion()
-            topology_system = forcefield.createSystem(
-                modeller.topology,
-                nonbondedMethod=app.PME,
-                nonbondedCutoff=1.0 * u.nanometer,
-                constraints=None,
-            )
-            interchange = Interchange.from_openmm(
-                topology=modeller.topology, system=topology_system, positions=modeller.positions
-            )
-            if modeller.topology.getPeriodicBoxVectors():
-                interchange.box = modeller.topology.getPeriodicBoxVectors()
-            interchange.to_top(str(output_dir / "system.top"))
-            interchange.to_gro(str(output_dir / "system.gro"))
-
-        protein_indices = [
-            atom.index for atom in modeller.topology.atoms() if atom.residue.name in PROTEIN_RESIDUES
-        ]
-        ligand_indices = [atom.index for atom in modeller.topology.atoms() if atom.residue.name == "LIG"]
-        if not protein_indices:
-            raise ValueError("No standard protein residues found; cannot apply protein restraints")
-        if not ligand_indices:
-            raise ValueError("No LIG residue found; cannot apply ligand restraints")
-        protein_atoms = [
-            atom for atom in modeller.topology.atoms()
-            if atom.residue.name in PROTEIN_RESIDUES
-            and atom.element is not None and atom.element.symbol != "H"
-        ]
-        backbone_names = {"N", "CA", "C", "O", "OXT"}
-        protein_bb_indices = [atom.index for atom in protein_atoms if atom.name.upper() in backbone_names]
-        protein_sc_indices = [atom.index for atom in protein_atoms if atom.name.upper() not in backbone_names]
-        ligand_heavy_indices = [
-            atom.index for atom in modeller.topology.atoms()
-            if atom.residue.name == "LIG" and atom.element is not None and atom.element.symbol != "H"
-        ]
-        if not protein_bb_indices:
-            raise ValueError("No protein backbone heavy atoms found; cannot apply protein restraints")
-        if not ligand_heavy_indices:
-            raise ValueError("No ligand heavy atoms found; cannot apply ligand restraints")
-        lipid_p_indices = []
-        if args.membrane:
-            lipid_residue_names = {args.lipid_type, args.lipid_type[:3]}
-            lipid_p_indices = [
-                atom.index for atom in modeller.topology.atoms()
-                if atom.residue.name in lipid_residue_names and atom.name.upper() == "P"
-            ]
-            if not lipid_p_indices:
-                raise ValueError("No lipid phosphorus atoms found; cannot apply membrane equilibration restraints")
-        raw_schedule = staged_equilibration_schedule(args.membrane)
-        initial_restraints = raw_schedule[0][2]
-        logger.info(
-            "Applying staged restraints to %d protein backbone heavy atoms, %d side-chain heavy atoms, "
-            "%d ligand heavy atoms%s",
-            len(protein_bb_indices), len(protein_sc_indices), len(ligand_heavy_indices),
-            f", and {len(lipid_p_indices)} lipid phosphorus atoms along Z" if args.membrane else "",
-        )
-        add_positional_restraints(
-            system, modeller.positions, protein_bb_indices, RESTRAINT_PARAMETERS["protein_bb"],
-            initial_restraints["protein_bb"],
-        )
-        add_positional_restraints(
-            system, modeller.positions, protein_sc_indices, RESTRAINT_PARAMETERS["protein_sc"],
-            initial_restraints["protein_sc"],
-        )
-        add_positional_restraints(
-            system, modeller.positions, ligand_heavy_indices, RESTRAINT_PARAMETERS["ligand"],
-            initial_restraints["ligand"],
-        )
-        if args.membrane:
-            add_positional_restraints(
-                system, modeller.positions, lipid_p_indices, RESTRAINT_PARAMETERS["lipid_pz"],
-                initial_restraints["lipid_pz"], axes=("z",),
-            )
-
-        stage_steps = equilibration_stage_steps(args.timestep_fs)
-        schedule_steps = [stage_steps] * (len(raw_schedule) - 1) + [args.prod_steps]
-        stages = []
-        cumulative_steps = 0
-        for (stage_name, ensemble, strengths), step_count in zip(raw_schedule, schedule_steps):
-            cumulative_steps += step_count
-            stages.append({
-                "name": stage_name,
-                "ensemble": ensemble,
-                "restraints": strengths,
-                "end_step": cumulative_steps,
-            })
-        stage_names = [stage["name"] for stage in stages]
-        phase = "nvt1"
-        if not resume:
-            checkpoint_path = output_dir / f"checkpoint-{phase}.chk"
-        else:
-            checkpoint_path = output_dir / previous_progress["checkpoint"]
         if resume:
-            phase = previous_progress["phase"]
-        start_stage_index = stage_names.index(phase)
-        if stages[start_stage_index]["ensemble"] == "npt":
-            system.addForce(make_barostat(args))
-
-        integrator = mm.LangevinMiddleIntegrator(
-            args.temperature_k * u.kelvin,
-            args.friction_per_ps / u.picosecond,
-            args.timestep_fs * u.femtoseconds,
-        )
-        integrator.setRandomNumberSeed(derived_seed(args.seed, 2))
-        simulation = app.Simulation(
-            modeller.topology, system, integrator, platform, platform_properties
-        )
-        if resume:
-            simulation.loadCheckpoint(str(checkpoint_path))
             logger.info("Resumed %s phase at step %d", phase, simulation.currentStep)
             kept_rows = truncate_state_data_to_step(
                 output_dir / "state_data.csv", simulation.currentStep
@@ -992,13 +1129,6 @@ def main():
             logger.info(
                 "Trimmed reporter outputs to checkpoint: %d state rows and %d trajectory frames retained",
                 kept_rows, kept_frames,
-            )
-        else:
-            simulation.context.setPositions(modeller.positions)
-            logger.info("Minimizing energy")
-            simulation.minimizeEnergy(maxIterations=args.minimize_iterations)
-            simulation.context.setVelocitiesToTemperature(
-                args.temperature_k * u.kelvin, derived_seed(args.seed, 0)
             )
 
         state_data_file = output_dir / "state_data.csv"
@@ -1033,6 +1163,7 @@ def main():
             nonlocal checkpoint_path
             checkpoint_path = output_dir / f"checkpoint-{phase_name}.chk"
             save_checkpoint_atomically(simulation, checkpoint_path)
+            serialize_xml_atomic(simulation.system, serialized_system_path(checkpoint_path))
             simulation.reporters = [
                 reporter
                 for reporter in simulation.reporters
