@@ -9,6 +9,7 @@ from openmm import app
 from openmm import unit as u
 
 from prot_lig_runner.simulate import (
+    AbsoluteStepXTCReporter,
     load_serialized_resume,
     serialize_xml_atomic,
     serialized_system_path,
@@ -354,6 +355,38 @@ class SeamlessResumeTests(unittest.TestCase):
             state.getVelocities(asNumpy=True).value_in_unit(u.nanometer / u.picosecond),
             reference.getVelocities(asNumpy=True).value_in_unit(u.nanometer / u.picosecond),
         )
+
+
+class AbsoluteStepXtcReporterTests(unittest.TestCase):
+    def test_frames_written_after_a_restart_keep_absolute_steps(self):
+        topology = make_toy_topology()
+        system = make_toy_system()
+        system.setDefaultPeriodicBoxVectors(
+            mm.Vec3(2.0, 0.0, 0.0) * u.nanometer,
+            mm.Vec3(0.0, 2.0, 0.0) * u.nanometer,
+            mm.Vec3(0.0, 0.0, 2.0) * u.nanometer,
+        )
+        integrator = make_toy_integrator()
+        integrator.setRandomNumberSeed(11)
+        simulation = app.Simulation(
+            topology, system, integrator, mm.Platform.getPlatformByName("CPU")
+        )
+        simulation.context.setPositions(
+            [mm.Vec3(0.4 + 0.05 * i, 0.5 + 0.05 * i, 0.6) for i in range(4)]
+            * u.nanometer
+        )
+        simulation.context.setVelocitiesToTemperature(300 * u.kelvin, 7)
+        simulation.step(1000)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trajectory.xtc"
+            simulation.reporters.append(AbsoluteStepXTCReporter(str(path), 10))
+            simulation.step(100)
+            with md.formats.XTCTrajectoryFile(str(path)) as handle:
+                _, _, steps, _ = handle.read()
+            self.assertEqual(
+                [int(step) for step in steps], list(range(1010, 1101, 10))
+            )
+            self.assertEqual(truncate_trajectory_to_step(path, 1050), 5)
 
 
 if __name__ == "__main__":

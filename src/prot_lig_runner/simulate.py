@@ -658,6 +658,57 @@ class AtomicCheckpointReporter:
         save_checkpoint_atomically(simulation, self.path)
 
 
+class AbsoluteStepXTCReporter(app.XTCReporter):
+    """Write XTC frames stamped with the simulation's absolute step.
+
+    OpenMM's XTCReporter numbers frames from the creation of the file
+    (interval, 2*interval, ...), so a trajectory first created after a mid-run
+    restart starts at step 1000 instead of the checkpoint step. A later restart
+    would then compare those relative numbers with the absolute checkpoint step,
+    keep frames that are actually stale, and duplicate frames. Beginning the
+    file at the simulation's own step keeps the numbering absolute.
+    """
+
+    @staticmethod
+    def count_frames(path):
+        path = Path(path)
+        if not path.is_file() or path.stat().st_size == 0:
+            return 0
+        file_size = path.stat().st_size
+        offset = frame_count = 0
+        with path.open("rb") as handle:
+            while offset + XTC_HEADER_BYTES + 4 <= file_size:
+                frame_end = xtc_frame_end(handle, offset, file_size)
+                if frame_end is None:
+                    break
+                frame_count += 1
+                offset = frame_end
+        return frame_count
+
+    def report(self, simulation, state):
+        if self._xtc is None:
+            # XTCFile writes a frame's step as first_step + frame_index*interval
+            # (zero-based), so solve for the first_step that makes this frame
+            # carry the simulation's real step.
+            first_step = max(
+                0,
+                simulation.currentStep
+                - self.count_frames(self._fileName) * self._reportInterval,
+            )
+            self._xtc = app.XTCFile(
+                str(self._fileName),
+                simulation.topology,
+                simulation.integrator.getStepSize(),
+                first_step,
+                self._reportInterval,
+                self._append,
+            )
+        positions = state.getPositions(asNumpy=True)
+        self._xtc.writeModel(
+            positions, periodicBoxVectors=state.getPeriodicBoxVectors()
+        )
+
+
 def truncate_state_data_to_step(path, checkpoint_step):
     """Drop reporter rows that were written after the loaded checkpoint."""
     path = Path(path)
@@ -1251,7 +1302,7 @@ def main():
                     temperature=True, speed=True,
                     separator=",", append=append_outputs
                 ),
-                app.XTCReporter(
+                AbsoluteStepXTCReporter(
                     str(trajectory_file), args.xtc_interval, append=append_trajectory
                 ),
                 AtomicCheckpointReporter(checkpoint_path, args.checkpoint_interval),
