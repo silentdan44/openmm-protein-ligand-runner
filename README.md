@@ -86,7 +86,7 @@ The runner validates input files and simulation counts before starting. Configur
 
 The output directory contains `system_final.pdb`, `trajectory.xtc`, `state_data.csv`, `run_state.json`, `run_environment.json`, checkpoints, and `final_state.xml` after completion. `run_environment.json` records the selected OpenMM platform and its properties, Python/OpenMM versions, OS and CPU details, thread-related environment variables, and NVIDIA GPU/driver details when `nvidia-smi` is available. Resumed sessions are recorded separately. Analysis writes `analysis/report.html`, `analysis/metrics.json`, `analysis/time_series.csv`, plots, and available ligand-contact, hydrogen-bond, and residue-distance tables.
 
-The report includes simulation QC, protein stability and RMSF, ligand pose and pocket contacts, contact and hydrogen-bond occupancy, selected Cα–Cα residue distances, and membrane metrics when applicable. Optional metrics are omitted with a note when their data is unavailable.
+The report includes simulation QC, protein stability and RMSF, ligand pose and pocket contacts, contact and hydrogen-bond occupancy, selected Cα–Cα residue distances, and membrane metrics when applicable. Ligand RMSD is reported against two references: the first production frame (dashed curves in the per-ligand plots) and the input pose from `system_final.pdb`; protein RMSD is always against the first production frame, not the input structure. Optional metrics are omitted with a note when their data is unavailable.
 
 ### Plots in the HTML report
 
@@ -96,7 +96,9 @@ The report includes simulation QC, protein stability and RMSF, ligand pose and p
 | Protein stability | Whole-protein backbone RMSD; membrane-core Cα RMSD for membrane systems. | When trajectory metrics are available; membrane-core panel only for membrane systems. |
 | Protein RMSF | Per-residue Cα RMSF, with separate traces for protein chains. | When per-residue fluctuations can be calculated. |
 | Ligand pocket | Ligand RMSD after protein alignment, pocket-contact count, and protein–ligand hydrogen-bond count (all ligands together). | When trajectory metrics are available. |
-| Per-ligand pocket | One figure per ligand (`ligand_pocket_LIGn.png`) with that ligand's RMSD and its own contact/hydrogen-bond counts. | When trajectory metrics are available; one per LIG residue. |
+| Per-ligand pocket | One figure per ligand (`ligand_pocket_LIGn.png`) with that ligand's RMSD against the first production frame and against the input pose (dashed), its own contact and hydrogen-bond counts. | When trajectory metrics are available; one per LIG residue. |
+| MMPBSA membrane planes | Phosphorus z distribution, the median lower/upper planes used for `pb_mem` thickness, and rejected outlier phosphates. | `pb_mem` with an automatically estimated membrane thickness. |
+| MMPBSA entropy | Running ΔH, −TΔS (interaction entropy) and ΔG, plus the per-frame ΔEEL distribution. | When MMPBSA frames are available. |
 | Ligand comparison | RMSD and contact count of every ligand on shared axes. | When the run has more than one ligand. |
 | Contact occupancy | Up to 20 protein residues ranked by fraction of frames in contact with the ligand. | When ligand contacts are detected. |
 | Hydrogen-bond occupancy | Up to 20 protein–ligand hydrogen bonds ranked by fraction of frames. | When hydrogen bonds are detected. |
@@ -141,9 +143,13 @@ gmx_MMPBSA estimates one binding affinity per calculation, so a run with several
 --mmpbsa --mmpbsa-ligand 2
 ```
 
-Omit `--mmpbsa-last-ns` to use all production frames. If the requested window exceeds the available trajectory, all available production frames are used and a warning is logged. `--mmpbsa-interval` samples frames for MMPBSA; `--analysis-stride` independently controls frames loaded for trajectory metrics and plots. Choose `gb`, `pb`, or (for a membrane run) `pb_mem`; `pb_mem` also requires `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0.
+Omit `--mmpbsa-last-ns` to use all production frames. If the requested window exceeds the available trajectory, all available production frames are used and a warning is logged. `--mmpbsa-interval` samples frames for MMPBSA; `--analysis-stride` independently controls frames loaded for trajectory metrics and plots. Choose `gb`, `pb`, or (for a membrane run) `pb_mem`; `pb_mem` derives the membrane thickness from the phosphate planes unless you pass `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0.
 
-MMPBSA treats water and lipids implicitly while using the full membrane MD trajectory to extract protein and ligand atoms. Results include `analysis/mmpbsa/FINAL_RESULTS_MMPBSA.dat`, `.csv`, and `gmx_MMPBSA.log`; the HTML report includes MMPBSA plots when results are available. This is an approximate end-state estimate, not an absolute binding free energy. Frame-to-frame variation is descriptive because adjacent frames are correlated; use equilibrated trajectories and independent replicas for scientific interpretation. Per-residue decomposition is optional via `--mmpbsa-decomposition` and costs additional computation.
+MMPBSA treats water and lipids implicitly while using the full membrane MD trajectory to extract protein and ligand atoms. Results include `analysis/mmpbsa/FINAL_RESULTS_MMPBSA.dat`, `.csv`, `entropy.json`, and `gmx_MMPBSA.log`. The report gives ΔH (MM/PBSA enthalpy), −TΔS from the interaction-entropy method (`--mmpbsa-entropy ie`, the default) or zero (`none`), and ΔG = ΔH − TΔS with a block-estimated SEM. Interaction entropy uses the per-frame protein–ligand electrostatic energy, −TΔS = kT ln⟨exp(ΔEel/kT)⟩; it is an approximation, not a full normal-mode or quasi-harmonic entropy.
+
+For `pb_mem`, the membrane thickness is estimated from the lipid phosphate planes of the built system unless `--mmpbsa-membrane-thickness-angstrom` is given. Per-leaflet medians with a MAD cut are used, so flipped phosphates do not move the plane; `analysis/mmpbsa/membrane_planes.json` records the planes, counts and rejected atoms, and `mmpbsa_membrane_planes.png` shows the selection. The membrane dielectric defaults to 7.0 (`--mmpbsa-membrane-dielectric`).
+
+This is an approximate end-state estimate, not an absolute binding free energy. Use it to rank ligands under one protocol, ideally across independent replicas; frame-to-frame variation is descriptive because adjacent frames are correlated. Per-residue decomposition is optional via `--mmpbsa-decomposition` and costs additional computation.
 
 To rebuild analysis from a completed run, or run MMPBSA when its topology files are present:
 

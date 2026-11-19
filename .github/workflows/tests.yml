@@ -1,0 +1,30 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: test
+          create-args: >-
+            python=3.11
+            openmm=8.6.1
+            pdbfixer=1.11
+            openff-toolkit=0.16.5
+            openff-interchange=0.4.1
+            openmmforcefields=0.15.1
+            numpy>=1.26.4,<2
+            mdtraj>=1.10,<2
+            pandas>=2.2,<3
+            matplotlib>=3.8,<4
+            scipy>=1.14.1,<2
+            seaborn>=0.13,<0.14
+      - name: Run unit tests
+        shell: bash -el {0}
+        run: python -m unittest discover -s tests -v

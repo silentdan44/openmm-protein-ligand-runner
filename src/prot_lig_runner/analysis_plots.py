@@ -190,7 +190,12 @@ def _plot_trajectory(output_dir, data):
         def draw(plt):
             label = ligand_data["label"]
             fig, axes = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True)
-            axes[0].plot(time, ligand_data["rmsd_nm"], color="#dc2626", linewidth=1)
+            axes[0].plot(time, ligand_data["rmsd_nm"], color="#dc2626", linewidth=1,
+                         label="vs first production frame")
+            if ligand_data.get("pose_rmsd_nm") is not None:
+                axes[0].plot(time, ligand_data["pose_rmsd_nm"], color="#7c3aed",
+                             linewidth=1, linestyle="--", label="vs input pose")
+            axes[0].legend(frameon=False, fontsize=8)
             _axis(axes[0], f"{label} ({ligand_data['residue']}) RMSD after protein alignment", "nm")
             axes[1].plot(time, ligand_data["contacts"], color="#c2410c", linewidth=1,
                          label="Protein residues within 0.45 nm")
@@ -520,11 +525,16 @@ def build_report(output_dir, metrics, generated_plots, *, warnings=None):
     ligand_stats = trajectory_metrics.get("ligands") or {}
     ligand_table = ""
     if ligand_stats:
+        def pose_text(stats):
+            value = stats.get("ligand_pose_rmsd_nm_mean")
+            return "—" if value is None else f"{value:.3f}"
+
         rows = "".join(
             "<tr>"
             f"<td>{html.escape(label)}</td>"
             f"<td>{html.escape(str(stats.get('residue', '')))}</td>"
             f"<td>{stats.get('ligand_rmsd_nm_mean', float('nan')):.3f}</td>"
+            f"<td>{pose_text(stats)}</td>"
             f"<td>{stats.get('ligand_rg_nm_mean', float('nan')):.3f}</td>"
             f"<td>{stats.get('ligand_contacts_mean', float('nan')):.1f}</td>"
             f"<td>{stats.get('protein_ligand_hbonds_mean', float('nan')):.1f}</td>"
@@ -533,8 +543,9 @@ def build_report(output_dir, metrics, generated_plots, *, warnings=None):
         )
         ligand_table = (
             "<h2>Per-ligand summary</h2>"
-            "<table><thead><tr><th>Ligand</th><th>Residue</th><th>RMSD mean (nm)</th>"
-            "<th>Rg mean (nm)</th><th>Contacts mean</th><th>H-bonds mean</th></tr></thead>"
+            "<table><thead><tr><th>Ligand</th><th>Residue</th><th>RMSD vs production start (nm)</th>"
+            "<th>RMSD vs input pose (nm)</th><th>Rg mean (nm)</th><th>Contacts mean</th>"
+            "<th>H-bonds mean</th></tr></thead>"
             f"<tbody>{rows}</tbody></table>"
         )
     mmpbsa = metrics.get("mmpbsa") or {}

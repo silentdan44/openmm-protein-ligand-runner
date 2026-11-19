@@ -408,6 +408,14 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
 
     trajectory.superpose(trajectory, 0, atom_indices=protein_ca)
     reference = trajectory[0]
+    pose_reference = None
+    try:
+        initial = md.load_pdb(str(topology_path))
+        if initial.n_atoms == trajectory.n_atoms:
+            initial.superpose(trajectory, frame=0, atom_indices=protein_ca)
+            pose_reference = initial.xyz[0]
+    except Exception as error:
+        logger.warning("Ligand pose RMSD against the input structure is unavailable: %s", error)
     protein_backbone = topology.select("protein and backbone")
     if len(protein_backbone) == 0:
         protein_backbone = protein_ca
@@ -420,6 +428,11 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
     for group in groups:
         group_delta = trajectory.xyz[:, group["atoms"]] - reference.xyz[0, group["atoms"]]
         group["rmsd_nm"] = np.sqrt(np.mean(np.sum(group_delta * group_delta, axis=2), axis=1))
+        if pose_reference is not None:
+            pose_delta = trajectory.xyz[:, group["atoms"]] - pose_reference[group["atoms"]]
+            group["pose_rmsd_nm"] = np.sqrt(np.mean(np.sum(pose_delta * pose_delta, axis=2), axis=1))
+        else:
+            group["pose_rmsd_nm"] = None
         group["rg_nm"] = md.compute_rg(trajectory.atom_slice(group["heavy_atoms"]))
         group["contacts"] = np.zeros(trajectory.n_frames)
         group["hbonds"] = np.zeros(trajectory.n_frames, dtype=int)
@@ -567,6 +580,8 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
             row[f"distance_nm:{label}"] = float(values[index])
         for group in groups:
             row[f"ligand_rmsd_nm:{group['label']}"] = float(group["rmsd_nm"][index])
+            if group["pose_rmsd_nm"] is not None:
+                row[f"ligand_pose_rmsd_nm:{group['label']}"] = float(group["pose_rmsd_nm"][index])
             row[f"ligand_rg_nm:{group['label']}"] = float(group["rg_nm"][index])
             row[f"ligand_contacts:{group['label']}"] = int(group["contacts"][index])
             row[f"protein_ligand_hbonds:{group['label']}"] = int(group["hbonds"][index])
@@ -594,6 +609,13 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
             "residue": group["residue_label"],
             "ligand_rmsd_nm_mean": float(np.mean(group["rmsd_nm"])),
             "ligand_rmsd_nm_std": float(np.std(group["rmsd_nm"])),
+            **(
+                {
+                    "ligand_pose_rmsd_nm_mean": float(np.mean(group["pose_rmsd_nm"])),
+                    "ligand_pose_rmsd_nm_std": float(np.std(group["pose_rmsd_nm"])),
+                }
+                if group["pose_rmsd_nm"] is not None else {}
+            ),
             "ligand_rg_nm_mean": float(np.mean(group["rg_nm"])),
             "ligand_contacts_mean": float(np.mean(group["contacts"])),
             "protein_ligand_hbonds_mean": float(np.mean(group["hbonds"])),
@@ -614,6 +636,7 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
                 "label": group["label"],
                 "residue": group["residue_label"],
                 "rmsd_nm": group["rmsd_nm"],
+                "pose_rmsd_nm": group["pose_rmsd_nm"],
                 "rg_nm": group["rg_nm"],
                 "contacts": group["contacts"],
                 "hbonds": group["hbonds"],
