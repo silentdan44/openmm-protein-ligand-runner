@@ -242,42 +242,58 @@ def _membrane_timeseries(trajectory, lipid_type, center_z_nm):
     }
 
 
-def _unwrap_periodic(trajectory):
-    """Make coordinates continuous across frames, in place.
+def _image_to_reference(trajectory):
+    """Put every residue in the periodic image nearest its first-frame position.
 
     XTC stores each frame as written by the integrator, so a molecule that
     crosses a periodic boundary appears on the opposite side in the next
     frame. That produces box-sized jumps in RMSD and contact counts that look
-    like binding/unbinding events. Minimum-image unwrapping per atom, relative
-    to the previous frame, removes them; it is valid because atoms move far
-    less than half a box between saved frames.
+    like binding/unbinding events.
+
+    Shifting each residue by an integer number of box vectors (chosen so the
+    residue lands in the image nearest its frame-0 position) removes those
+    jumps. Rounding to whole box vectors leaves sub-box motion untouched, so
+    real binding/unbinding is preserved. Residues are imaged as units so a
+    molecule never gets torn across the boundary.
+
+    Do not first shift ligands towards the protein centroid: a membrane protein
+    is comparable in size to the box, so a bound ligand at the periphery can be
+    more than half a box from that centroid and would be moved to the wrong
+    image. Contact and hydrogen-bond distances use the periodic minimum image,
+    which is insensitive to the frame's image.
     """
     import numpy as np
 
     boxes = trajectory.unitcell_vectors
     if boxes is None or len(trajectory.xyz) < 2:
         return
+
+    # Residues are contiguous in the topology, so one reduceat per frame chunk
+    # gives every residue centroid without a Python loop over residues.
+    starts = []
+    counts = []
+    for residue in trajectory.topology.residues:
+        starts.append(residue.atom(0).index if hasattr(residue, "atom") else residue.first_atom)
+        counts.append(residue.n_atoms)
+    starts = np.asarray(starts, dtype=np.int64)
+    counts = np.asarray(counts, dtype=np.int64)
+    if starts.size == 0 or starts[0] != 0 or np.any(starts[1:] != starts[:-1] + counts[:-1]):
+        return  # non-contiguous topology: leave coordinates as they are
+
     xyz = trajectory.xyz
-    for frame in range(1, xyz.shape[0]):
-        delta = xyz[frame] - xyz[frame - 1]
-        fractional = delta @ np.linalg.inv(boxes[frame])
-        delta = (fractional - np.round(fractional)) @ boxes[frame]
-        xyz[frame] = xyz[frame - 1] + delta
-
-
-def _place_ligands_in_protein_image(trajectory, protein_atoms, ligand_atoms):
-    """Shift each ligand into the protein's periodic image in the first frame."""
-    import numpy as np
-
-    boxes = trajectory.unitcell_vectors
-    if boxes is None or len(trajectory.xyz) == 0:
-        return
-    protein_center = trajectory.xyz[0, protein_atoms].mean(axis=0)
-    for atoms in ligand_atoms:
-        shift = trajectory.xyz[0, atoms].mean(axis=0) - protein_center
-        fractional = shift @ np.linalg.inv(boxes[0])
-        image_shift = (fractional - np.round(fractional)) @ boxes[0] - shift
-        trajectory.xyz[:, atoms] += image_shift
+    chunk = max(1, min(64, xyz.shape[0]))
+    reference = None
+    for begin in range(0, xyz.shape[0], chunk):
+        end = min(begin + chunk, xyz.shape[0])
+        block = xyz[begin:end]
+        centroids = np.add.reduceat(block, starts, axis=1) / counts[None, :, None]
+        if reference is None:
+            reference = centroids[0].copy()
+        for offset in range(end - begin):
+            box = boxes[begin + offset]
+            fractional = (centroids[offset] - reference) @ np.linalg.inv(box)
+            shift = -np.round(fractional) @ box
+            block[offset] += np.repeat(shift, counts, axis=0)
 
 
 def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, analysis_stride=10,
@@ -316,14 +332,10 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
             )
 
     if trajectory.unitcell_vectors is not None:
-        # Put every ligand in the protein's image in the reference frame, then
-        # make the whole trajectory continuous. Without the second step a
-        # molecule crossing a boundary jumps by a box length between frames and
-        # shows up as a fake unbinding event in RMSD and contact curves.
-        _place_ligands_in_protein_image(
-            trajectory, protein_atoms, [group["atoms"] for group in groups]
-        )
-        _unwrap_periodic(trajectory)
+        # RMSD needs a continuous trajectory: a molecule that crosses a
+        # boundary would otherwise jump by a box length between frames and
+        # look like a binding/unbinding event.
+        _image_to_reference(trajectory)
 
     trajectory.superpose(trajectory, 0, atom_indices=protein_ca)
     reference = trajectory[0]
@@ -350,7 +362,7 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
     contact_rows = []
     if residue_pairs.size:
         distances, actual_pairs = md.compute_contacts(
-            trajectory, contacts=residue_pairs, scheme="closest-heavy", periodic=False
+            trajectory, contacts=residue_pairs, scheme="closest-heavy", periodic=True
         )
         contacts = (distances < 0.45).sum(axis=1)
         for pair_index, (protein_idx, ligand_idx) in enumerate(actual_pairs):
@@ -382,7 +394,7 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
         complex_topology = complex_trajectory.topology
         complex_protein = complex_topology.select("protein")
         complex_ligand = complex_topology.select("resname LIG")
-        candidates = md.baker_hubbard(complex_trajectory, freq=0.0, exclude_water=True, periodic=False)
+        candidates = md.baker_hubbard(complex_trajectory, freq=0.0, exclude_water=True, periodic=True)
         protein_set, ligand_set = set(complex_protein), set(complex_ligand)
         candidates = [tuple(map(int, triplet)) for triplet in candidates
                       if (triplet[0] in protein_set and triplet[2] in ligand_set)
@@ -390,8 +402,8 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
         if candidates:
             triplets = np.asarray(candidates, dtype=int)
             donor_acceptor_pairs = triplets[:, [1, 2]]
-            distances = md.compute_distances(complex_trajectory, donor_acceptor_pairs, periodic=False)
-            angles = md.compute_angles(complex_trajectory, triplets, periodic=False)
+            distances = md.compute_distances(complex_trajectory, donor_acceptor_pairs, periodic=True)
+            angles = md.compute_angles(complex_trajectory, triplets, periodic=True)
             present = (distances < 0.25) & (angles > np.deg2rad(120.0))
             hbonds_per_frame = present.sum(axis=1)
             for index, triplet in enumerate(candidates):
