@@ -242,6 +242,44 @@ def _membrane_timeseries(trajectory, lipid_type, center_z_nm):
     }
 
 
+def _unwrap_periodic(trajectory):
+    """Make coordinates continuous across frames, in place.
+
+    XTC stores each frame as written by the integrator, so a molecule that
+    crosses a periodic boundary appears on the opposite side in the next
+    frame. That produces box-sized jumps in RMSD and contact counts that look
+    like binding/unbinding events. Minimum-image unwrapping per atom, relative
+    to the previous frame, removes them; it is valid because atoms move far
+    less than half a box between saved frames.
+    """
+    import numpy as np
+
+    boxes = trajectory.unitcell_vectors
+    if boxes is None or len(trajectory.xyz) < 2:
+        return
+    xyz = trajectory.xyz
+    for frame in range(1, xyz.shape[0]):
+        delta = xyz[frame] - xyz[frame - 1]
+        fractional = delta @ np.linalg.inv(boxes[frame])
+        delta = (fractional - np.round(fractional)) @ boxes[frame]
+        xyz[frame] = xyz[frame - 1] + delta
+
+
+def _place_ligands_in_protein_image(trajectory, protein_atoms, ligand_atoms):
+    """Shift each ligand into the protein's periodic image in the first frame."""
+    import numpy as np
+
+    boxes = trajectory.unitcell_vectors
+    if boxes is None or len(trajectory.xyz) == 0:
+        return
+    protein_center = trajectory.xyz[0, protein_atoms].mean(axis=0)
+    for atoms in ligand_atoms:
+        shift = trajectory.xyz[0, atoms].mean(axis=0) - protein_center
+        fractional = shift @ np.linalg.inv(boxes[0])
+        image_shift = (fractional - np.round(fractional)) @ boxes[0] - shift
+        trajectory.xyz[:, atoms] += image_shift
+
+
 def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, analysis_stride=10,
                        distance_pairs=None):
     import mdtraj as md
@@ -278,13 +316,14 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
             )
 
     if trajectory.unitcell_vectors is not None:
-        boxes = trajectory.unitcell_vectors
-        for frame in range(trajectory.n_frames):
-            box = boxes[frame]
-            delta = trajectory.xyz[frame, ligand_all].mean(axis=0) - trajectory.xyz[frame, protein_atoms].mean(axis=0)
-            fractional = delta @ np.linalg.inv(box)
-            image_delta = (fractional - np.round(fractional)) @ box
-            trajectory.xyz[frame, ligand_all] += image_delta - delta
+        # Put every ligand in the protein's image in the reference frame, then
+        # make the whole trajectory continuous. Without the second step a
+        # molecule crossing a boundary jumps by a box length between frames and
+        # shows up as a fake unbinding event in RMSD and contact curves.
+        _place_ligands_in_protein_image(
+            trajectory, protein_atoms, [group["atoms"] for group in groups]
+        )
+        _unwrap_periodic(trajectory)
 
     trajectory.superpose(trajectory, 0, atom_indices=protein_ca)
     reference = trajectory[0]

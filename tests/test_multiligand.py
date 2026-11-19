@@ -196,5 +196,43 @@ class PerLigandReportTests(unittest.TestCase):
                 self.assertTrue((analysis_dir / name).is_file(), name)
 
 
+class PeriodicUnwrapTests(unittest.TestCase):
+    def test_ligand_crossing_the_box_is_not_a_jump(self):
+        topology = make_mdtraj_topology()
+        box = 4.0
+        frames, atoms = 3, topology.n_atoms
+        xyz = np.zeros((frames, atoms, 3), dtype=np.float32)
+        xyz[:, :, 0] = 1.0
+        xyz[:, :, 1] = 1.0
+        xyz[:, :, 2] = 1.0
+        ligand2 = [atom.index for atom in topology.atoms if atom.residue.resSeq == 12]
+        # Ligand 2 sits near the boundary and crosses it between frames: +0.15 nm
+        # of real motion appears as -3.85 nm in wrapped coordinates.
+        xyz[0, ligand2, 0] = 3.95
+        xyz[1, ligand2, 0] = 0.10
+        xyz[2, ligand2, 0] = 0.25
+        trajectory = md.Trajectory(
+            xyz, topology, time=np.arange(frames) * 1000.0,
+            unitcell_lengths=np.tile([box, box, box], (frames, 1)),
+            unitcell_angles=np.tile([90.0, 90.0, 90.0], (frames, 1)),
+        )
+        config = {
+            "nvt_steps": 0, "npt_steps": 0, "timestep_fs": 1.0,
+            "membrane": False, "distance_pairs": [],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            trajectory_path = Path(directory) / "trajectory.xtc"
+            topology_path = Path(directory) / "system_final.pdb"
+            trajectory.save_xtc(str(trajectory_path))
+            trajectory[0].save_pdb(str(topology_path))
+            analysis_dir = Path(directory) / "analysis"
+            analysis_dir.mkdir()
+            result = trajectory_metrics(
+                trajectory_path, topology_path, analysis_dir, config, analysis_stride=1
+            )
+        rmsd = result["ligands"][1]["rmsd_nm"]
+        self.assertLess(float(rmsd[-1]), 0.5, f"wrapped ligand produced a jump: {rmsd}")
+
+
 if __name__ == "__main__":
     unittest.main()
