@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import mdtraj as md
+import numpy as np
 import openmm as mm
 from openmm import app
 from openmm import unit as u
@@ -11,6 +13,7 @@ from prot_lig_runner.simulate import (
     serialize_xml_atomic,
     serialized_system_path,
     truncate_state_data_to_step,
+    truncate_trajectory_to_step,
 )
 
 
@@ -220,6 +223,137 @@ class TruncateStateDataTests(unittest.TestCase):
             path.write_text('#"Time","Temperature (K)"\n1.0,300.0\n')
             with self.assertRaises(ValueError):
                 truncate_state_data_to_step(path, 500)
+
+
+class TruncateTrajectoryTests(unittest.TestCase):
+    def make_trajectory(self, path, steps=100, interval=10):
+        topology = make_toy_topology()
+        system = make_toy_system()
+        system.setDefaultPeriodicBoxVectors(
+            mm.Vec3(2.0, 0.0, 0.0) * u.nanometer,
+            mm.Vec3(0.0, 2.0, 0.0) * u.nanometer,
+            mm.Vec3(0.0, 0.0, 2.0) * u.nanometer,
+        )
+        integrator = make_toy_integrator()
+        integrator.setRandomNumberSeed(11)
+        simulation = app.Simulation(
+            topology, system, integrator, mm.Platform.getPlatformByName("CPU")
+        )
+        simulation.context.setPositions(
+            [
+                mm.Vec3(0.4 + 0.05 * index, 0.5 + 0.05 * index, 0.6)
+                for index in range(4)
+            ]
+            * u.nanometer
+        )
+        simulation.context.setVelocitiesToTemperature(300 * u.kelvin, 7)
+        simulation.reporters.append(app.XTCReporter(str(path), interval))
+        simulation.step(steps)
+
+    @staticmethod
+    def read_steps(path):
+        with md.formats.XTCTrajectoryFile(str(path)) as handle:
+            positions, _, steps, _ = handle.read()
+        return [int(step) for step in steps], positions
+
+    def test_keeps_only_frames_at_or_before_checkpoint_step(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trajectory.xtc"
+            self.make_trajectory(path)
+            all_steps, _ = self.read_steps(path)
+            self.assertEqual(all_steps, list(range(10, 101, 10)))
+            self.assertEqual(truncate_trajectory_to_step(path, 55), 5)
+            steps, _ = self.read_steps(path)
+            self.assertEqual(steps, [10, 20, 30, 40, 50])
+
+    def test_keeps_the_frame_written_at_the_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trajectory.xtc"
+            self.make_trajectory(path)
+            self.assertEqual(truncate_trajectory_to_step(path, 50), 5)
+            steps, _ = self.read_steps(path)
+            self.assertEqual(steps[-1], 50)
+
+    def test_discards_a_partially_written_last_frame(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trajectory.xtc"
+            self.make_trajectory(path)
+            complete_size = path.stat().st_size
+            with path.open("ab") as handle:
+                handle.write(b"\x00" * 36)
+            self.assertEqual(truncate_trajectory_to_step(path, 100), 10)
+            self.assertEqual(path.stat().st_size, complete_size)
+            steps, _ = self.read_steps(path)
+            self.assertEqual(steps, list(range(10, 101, 10)))
+
+    def test_truncates_to_empty_when_checkpoint_is_at_step_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trajectory.xtc"
+            self.make_trajectory(path)
+            self.assertEqual(truncate_trajectory_to_step(path, 0), 0)
+            self.assertEqual(path.stat().st_size, 0)
+
+    def test_missing_or_empty_file_is_a_no_op(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing.xtc"
+            self.assertEqual(truncate_trajectory_to_step(path, 100), 0)
+            path.write_bytes(b"")
+            self.assertEqual(truncate_trajectory_to_step(path, 100), 0)
+
+    def test_rejects_a_file_that_is_not_xtc(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trajectory.xtc"
+            path.write_bytes(b"not an xtc file" * 10)
+            with self.assertRaises(ValueError):
+                truncate_trajectory_to_step(path, 100)
+
+
+class SeamlessResumeTests(unittest.TestCase):
+    def test_resume_matches_an_uninterrupted_run(self):
+        platform = mm.Platform.getPlatformByName("CPU")
+        topology = make_toy_topology()
+        positions = [
+            mm.Vec3(0.5 + 0.2 * index, 0.1 * index, -0.1 * index)
+            for index in range(4)
+        ] * u.nanometer
+
+        def new_simulation():
+            integrator = make_toy_integrator()
+            integrator.setRandomNumberSeed(1234)
+            simulation = app.Simulation(topology, make_toy_system(), integrator, platform)
+            simulation.context.setPositions(positions)
+            simulation.context.setVelocitiesToTemperature(300 * u.kelvin, 7)
+            return simulation, integrator
+
+        straight, _ = new_simulation()
+        straight.step(200)
+        reference = straight.context.getState(getPositions=True, getVelocities=True)
+
+        interrupted, integrator = new_simulation()
+        interrupted.step(120)
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = write_resume_artifacts(
+                directory, interrupted, interrupted.system, integrator, topology, positions
+            )
+            resumed = load_serialized_resume(
+                checkpoint,
+                Path(directory) / "integrator.xml",
+                Path(directory) / "system_final.pdb",
+                platform,
+                None,
+            )
+            resumed.step(80)
+        state = resumed.context.getState(getPositions=True, getVelocities=True)
+
+        self.assertEqual(resumed.currentStep, 200)
+        np.testing.assert_array_equal(
+            state.getPositions(asNumpy=True).value_in_unit(u.nanometer),
+            reference.getPositions(asNumpy=True).value_in_unit(u.nanometer),
+        )
+        np.testing.assert_array_equal(
+            state.getVelocities(asNumpy=True).value_in_unit(u.nanometer / u.picosecond),
+            reference.getVelocities(asNumpy=True).value_in_unit(u.nanometer / u.picosecond),
+        )
 
 
 if __name__ == "__main__":

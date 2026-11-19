@@ -8,6 +8,7 @@ import os
 import platform as host_platform
 import random
 import shutil
+import struct
 import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version
@@ -692,36 +693,116 @@ def truncate_state_data_to_step(path, checkpoint_step):
     return kept
 
 
-def truncate_trajectory_to_time(path, topology_path, checkpoint_time_ps, timestep_fs):
-    """Keep only complete XTC frames at or before the checkpoint time."""
-    import mdtraj as md
+XTC_MAGIC = 1995
+XTC_HEADER_BYTES = 52
+XTC_COORD_HEADER_BYTES = 40
 
-    path, topology_path = Path(path), Path(topology_path)
+
+def xtc_frame_end(handle, offset, file_size):
+    """Return the byte offset just past an XTC frame at ``offset``.
+
+    An XTC frame starts with a fixed 52-byte header (magic, atom count, step,
+    time, box). Coordinates follow in one of two layouts used by the writers
+    this runner interoperates with:
+
+    * bit-packed (xdrfile, OpenMM, mdtraj): atom count, precision, minimum and
+      maximum integer coordinates, and the compressed size;
+    * raw float32: atom count followed directly by ``3 * natoms`` floats,
+      chosen by the writer when packing would not save space.
+
+    Returns None when the frame is incomplete (torn by a killed process).
+    """
+    handle.seek(offset)
+    header = handle.read(XTC_HEADER_BYTES)
+    if len(header) < XTC_HEADER_BYTES:
+        return None
+    magic, num_atoms, _step = struct.unpack(">iii", header[:12])
+    if magic != XTC_MAGIC:
+        raise ValueError(f"not an XTC frame (magic {magic}) at byte {offset}")
+
+    coord_prefix = handle.read(XTC_COORD_HEADER_BYTES)
+    if len(coord_prefix) < XTC_COORD_HEADER_BYTES:
+        return None
+    coord_atoms = struct.unpack(">i", coord_prefix[:4])[0]
+    if coord_atoms != num_atoms:
+        raise ValueError(
+            f"inconsistent XTC frame at byte {offset}: header has {num_atoms} atoms, "
+            f"coordinate block has {coord_atoms}"
+        )
+
+    precision = struct.unpack(">f", coord_prefix[4:8])[0]
+    min_x, min_y, min_z, max_x, max_y, max_z, _index, compressed_size = struct.unpack(
+        ">8i", coord_prefix[8:40]
+    )
+    looks_compressed = (
+        0.0 < precision <= 1_000_000.0
+        and 0 < compressed_size < 12 * num_atoms
+        and min_x <= max_x
+        and min_y <= max_y
+        and min_z <= max_z
+    )
+    if looks_compressed:
+        frame_end = (
+            offset
+            + XTC_HEADER_BYTES
+            + XTC_COORD_HEADER_BYTES
+            + 4 * ((compressed_size + 3) // 4)
+        )
+    else:
+        frame_end = offset + XTC_HEADER_BYTES + 4 + 12 * num_atoms
+    return frame_end if frame_end <= file_size else None
+
+
+def truncate_trajectory_to_step(path, checkpoint_step):
+    """Keep only complete XTC frames at or before the checkpoint step.
+
+    Frames are matched by their integer step, not by time: XTC stores time as a
+    float32, which at production-length runs (500,000 ps) is quantized to about
+    0.03 ps and can neither reliably keep nor drop the frame written at the
+    checkpoint. The step column is exact.
+
+    The file is scanned header-by-header and truncated at a frame boundary
+    rather than decoded and rewritten, so a multi-gigabyte trajectory is
+    trimmed in seconds. A frame left half-written by a killed process is
+    discarded.
+    """
+    path = Path(path)
     if not path.is_file() or path.stat().st_size == 0:
         return 0
 
-    temporary = path.with_name(path.name + ".resume.tmp")
+    file_size = path.stat().st_size
+    offset = 0
+    keep_end = 0
     frames_kept = 0
-    time_tolerance_ps = min(float(timestep_fs) / 2000.0, 0.0005)
-    try:
-        with md.formats.XTCTrajectoryFile(str(temporary), mode="w") as writer:
-            for chunk in md.iterload(str(path), top=str(topology_path), chunk=1000):
-                selected = chunk[chunk.time <= checkpoint_time_ps + time_tolerance_ps]
-                if selected.n_frames:
-                    writer.write(
-                        selected.xyz, time=selected.time, box=selected.unitcell_vectors
-                    )
-                    frames_kept += selected.n_frames
-    except Exception:
-        if frames_kept == 0:
-            temporary.unlink(missing_ok=True)
-            raise
-        logger.warning(
-            "The trajectory tail could not be read while resuming; keeping its %d valid frames",
-            frames_kept,
-            exc_info=True,
-        )
-    temporary.replace(path)
+    previous_step = None
+    with path.open("rb") as handle:
+        while offset + XTC_HEADER_BYTES + 4 <= file_size:
+            handle.seek(offset)
+            header = handle.read(12)
+            if len(header) < 12:
+                break
+            step = struct.unpack(">i", header[8:12])[0]
+            frame_end = xtc_frame_end(handle, offset, file_size)
+            if frame_end is None:
+                logger.warning(
+                    "Discarding a partially written trajectory frame at byte %d", offset
+                )
+                break
+            if previous_step is not None and step < previous_step:
+                raise ValueError(
+                    f"trajectory steps are not monotonic at byte {offset} "
+                    f"({step} after {previous_step})"
+                )
+            if step > checkpoint_step:
+                break
+            frames_kept += 1
+            previous_step = step
+            keep_end = frame_end
+            offset = frame_end
+
+    if keep_end < file_size:
+        with path.open("r+b") as handle:
+            handle.truncate(keep_end)
     return frames_kept
 
 
@@ -1038,8 +1119,30 @@ def main():
     platform, platform_properties = get_platform(current_platform)
     logger.info("Using OpenMM platform %s", platform.getName())
     environment = execution_environment(args.platform, platform, platform_properties)
-    if resume and previous_progress["configuration"] != config:
-        raise SystemExit("Cannot resume: input files or simulation settings differ from checkpoint run")
+    if (
+        resume
+        and previous_progress is not None
+        and previous_progress["configuration"] != config
+    ):
+        previous_compared = {
+            key: value
+            for key, value in previous_progress["configuration"].items()
+            if key != "source_sha256"
+        }
+        current_compared = {
+            key: value for key, value in config.items() if key != "source_sha256"
+        }
+        if previous_compared != current_compared:
+            raise SystemExit(
+                "Cannot resume: input files or simulation settings differ from checkpoint run"
+            )
+        # The runner source hash is provenance, not a physics setting: resume
+        # restores the System and Integrator from the serialized artifacts, so a
+        # restart after a runner bug fix must not be refused.
+        logger.warning(
+            "Runner source differs from the original run; continuing from the "
+            "serialized System and Integrator"
+        )
     record_execution_environment(output_dir / "run_environment.json", environment, resume)
     logger.info("Execution environment: %s", json.dumps(environment, sort_keys=True))
 
@@ -1119,12 +1222,8 @@ def main():
             kept_rows = truncate_state_data_to_step(
                 output_dir / "state_data.csv", simulation.currentStep
             )
-            checkpoint_time_ps = simulation.currentStep * args.timestep_fs / 1000.0
-            kept_frames = truncate_trajectory_to_time(
-                output_dir / "trajectory.xtc",
-                output_dir / "system_final.pdb",
-                checkpoint_time_ps,
-                args.timestep_fs,
+            kept_frames = truncate_trajectory_to_step(
+                output_dir / "trajectory.xtc", simulation.currentStep
             )
             logger.info(
                 "Trimmed reporter outputs to checkpoint: %d state rows and %d trajectory frames retained",
@@ -1161,9 +1260,16 @@ def main():
 
         def checkpoint(phase_name):
             nonlocal checkpoint_path
-            checkpoint_path = output_dir / f"checkpoint-{phase_name}.chk"
-            save_checkpoint_atomically(simulation, checkpoint_path)
-            serialize_xml_atomic(simulation.system, serialized_system_path(checkpoint_path))
+            next_checkpoint_path = output_dir / f"checkpoint-{phase_name}.chk"
+            # Serialize the System before the checkpoint: the XML must describe
+            # the forces the checkpoint was written with. If the process dies in
+            # between, the previous checkpoint (and its System) is still intact
+            # and consistent, so resume replays at most the current phase.
+            serialize_xml_atomic(
+                simulation.system, serialized_system_path(next_checkpoint_path)
+            )
+            save_checkpoint_atomically(simulation, next_checkpoint_path)
+            checkpoint_path = next_checkpoint_path
             simulation.reporters = [
                 reporter
                 for reporter in simulation.reporters
