@@ -1,5 +1,7 @@
 """Topology export helpers for GROMACS and MMPBSA."""
 
+from .analysis_metrics import resolve_ligand, _residue_number
+
 
 def enable_batched_openmm_topology_conversion(batch_size=4096):
     """Batch molecule insertion to avoid quadratic OpenFF topology invalidation.
@@ -62,17 +64,42 @@ def keep_interchange_molecules_separate(interchange):
     }
 
 
-def export_mmpbsa_complex(forcefield, modeller, output_dir, protein_residues):
-    """Export a dry protein-ligand topology; solvent and lipids stay implicit."""
+def mmpbsa_complex_selection(topology, protein_residues, ligand_selector=None):
+    """Pick the ligand for MMPBSA and list atoms that must be deleted.
+
+    Keeps protein residues plus exactly one LIG residue, so a multi-ligand run
+    exports a complex whose single ligand group is the requested one.
+    """
+    selection = resolve_ligand(topology, ligand_selector)
+    kept_ligand = (selection["chain_index"], selection["res_seq"])
+    atoms = getattr(topology, "atoms")
+    atoms = atoms() if callable(atoms) else atoms
+    discarded = [
+        atom for atom in atoms
+        if atom.residue.name not in protein_residues
+        and not (
+            atom.residue.name == "LIG"
+            and (atom.residue.chain.index, _residue_number(atom.residue)) == kept_ligand
+        )
+    ]
+    return selection, discarded
+
+
+def export_mmpbsa_complex(forcefield, modeller, output_dir, protein_residues, ligand_selector=None):
+    """Export a dry protein-ligand topology; solvent and lipids stay implicit.
+
+    A run can contain several ligands, but gmx_MMPBSA estimates one binding
+    affinity per calculation, so the export keeps protein plus exactly one
+    ligand residue: the one selected with --mmpbsa-ligand.
+    """
     import openmm.app as app
     import openmm.unit as unit
     from openff.interchange import Interchange
 
+    _selection, discarded = mmpbsa_complex_selection(
+        modeller.topology, protein_residues, ligand_selector
+    )
     complex_modeller = app.Modeller(modeller.topology, modeller.positions)
-    discarded = [
-        atom for atom in complex_modeller.topology.atoms()
-        if atom.residue.name not in protein_residues and atom.residue.name != "LIG"
-    ]
     complex_modeller.delete(discarded)
     if not any(atom.residue.name == "LIG" for atom in complex_modeller.topology.atoms()):
         raise ValueError("Could not create a protein-ligand-only topology for MMPBSA")

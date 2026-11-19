@@ -126,6 +126,11 @@ def parse_args():
     )
     parser.add_argument("--mmpbsa-interval", type=positive_int, default=1,
                         help="Analyze every Nth saved frame in gmx_MMPBSA")
+    parser.add_argument(
+        "--mmpbsa-ligand",
+        help="Ligand whose binding affinity is estimated: 1-based --ligand order (2), "
+             "label (LIG2), or residue label; required when several ligands are simulated",
+    )
     parser.add_argument("--mmpbsa-last-ns", type=positive_float,
                         help="Restrict MMPBSA to the final N ns of production")
     parser.add_argument("--analysis-stride", type=positive_int, default=10,
@@ -1008,7 +1013,8 @@ def build_simulation(
 
     if args.mmpbsa:
         logger.info("Exporting protein-ligand-only topology for MMPBSA; membrane and solvent stay implicit")
-        export_mmpbsa_complex(forcefield, modeller, output_dir, PROTEIN_RESIDUES)
+        export_mmpbsa_complex(forcefield, modeller, output_dir, PROTEIN_RESIDUES,
+                              ligand_selector=args.mmpbsa_ligand)
     elif args.skip_gromacs_export:
         logger.info("Skipping GROMACS export as requested")
     else:
@@ -1371,6 +1377,7 @@ def main():
                     mmpbsa_membrane_dielectric=args.mmpbsa_membrane_dielectric,
                     analysis_stride=args.analysis_stride,
                     mmpbsa_decomposition=args.mmpbsa_decomposition,
+                    mmpbsa_ligand=args.mmpbsa_ligand,
                     distance_pairs=args.distance_pair,
                 )
                 break

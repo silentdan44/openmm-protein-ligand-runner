@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .analysis_metrics import trajectory_metrics
+from .analysis_metrics import resolve_ligand, trajectory_metrics
 from .analysis_plots import PLOT_FILES, _plot_mmpbsa, _plot_qc, _plot_trajectory, build_report
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,7 @@ def _copy_mmpbsa_window(source_path, topology_path, target_path, *, last_ns,
 
 def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None,
                membrane_thickness_angstrom=None, membrane_dielectric=7.0,
-               decomposition=False):
+               decomposition=False, ligand=None):
     """Run a single-trajectory gmx_MMPBSA estimate, optionally with decomposition."""
     executable = shutil.which("gmx_MMPBSA")
     if executable is None:
@@ -160,23 +160,32 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
     import mdtraj as md
     reference_path = mmpbsa_dir / "reference.pdb"
     source_trajectory = analysis_dir / "trajectory_fitted.xtc"
+    full_topology = md.load_topology(str(output_dir / "system_final.pdb"))
+    selection = resolve_ligand(full_topology, ligand)
+    full_complex_indices = list(full_topology.select("protein")) + list(selection["atoms"])
+    if not full_complex_indices:
+        raise ValueError("Could not select protein and ligand atoms from the simulation topology")
     if complex_only:
         # The requested GB/PB model treats water and lipids implicitly. Keep
         # the MMPBSA topology small and stream its atoms from the full MD XTC.
-        full_topology = md.load_topology(str(output_dir / "system_final.pdb"))
-        full_complex_indices = full_topology.select("protein or resname LIG")
-        if len(full_complex_indices) == 0:
-            raise ValueError("Could not select protein and LIG atoms from the simulation topology")
         complex_topology = md.load_topology(str(complex_pdb))
+        complex_ligands = [residue for residue in complex_topology.residues
+                           if residue.name == "LIG"]
+        if len(complex_ligands) != 1:
+            raise ValueError(
+                f"{complex_pdb} contains {len(complex_ligands)} ligand residues. "
+                "Regenerate it with --mmpbsa-ligand so one ligand is exported."
+            )
         if complex_topology.n_atoms != len(full_complex_indices):
             raise ValueError(
-                "MMPBSA complex topology does not match protein-ligand atoms in the simulation topology"
+                "MMPBSA complex topology does not match the selected protein-ligand "
+                "atoms in the simulation topology"
             )
         index_path = mmpbsa_dir / "index.ndx"
         write_index_file(
             index_path,
             list(complex_topology.select("protein")),
-            list(complex_topology.select("resname LIG")),
+            [atom.index for atom in complex_ligands[0].atoms],
         )
         complex_trajectory_path = mmpbsa_dir / "complex.xtc"
         if last_ns is not None:
@@ -206,7 +215,14 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
         md.load_pdb(str(output_dir / "system_final.pdb")).atom_slice(reference_atoms).save_pdb(str(reference_path))
         complex_structure = output_dir / "system_final.pdb"
         complex_topology_path = output_dir / "system.top"
-        mmpbsa_index = analysis_dir / "index.ndx"
+        # The full GROMACS topology can contain several ligands; the index
+        # groups decide which one is the ligand in this calculation.
+        mmpbsa_index = mmpbsa_dir / "index.ndx"
+        write_index_file(
+            mmpbsa_index,
+            list(full_reference.select("protein")),
+            list(selection["atoms"]),
+        )
         if last_ns is not None:
             mmpbsa_trajectory = mmpbsa_dir / "production_window.xtc"
             _copy_mmpbsa_window(
@@ -238,12 +254,14 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
 def analyze_run(output_dir, config, *, analysis_dir=None, preliminary_phase=None, perform_mmpbsa=False, mmpbsa_model="gb",
                 mmpbsa_interval=1, mmpbsa_last_ns=None, mmpbsa_membrane_thickness_angstrom=None,
                 mmpbsa_membrane_dielectric=7.0, mmpbsa_decomposition=False,
-                analysis_stride=10, distance_pairs=None):
+                analysis_stride=10, distance_pairs=None, mmpbsa_ligand=None):
     output_dir = Path(output_dir)
     analysis_dir = Path(analysis_dir) if analysis_dir is not None else output_dir / "analysis"
     analysis_dir.mkdir(parents=True, exist_ok=True)
     for name in PLOT_FILES:
         (analysis_dir / name).unlink(missing_ok=True)
+    for path in analysis_dir.glob("ligand_pocket_LIG*.png"):
+        path.unlink(missing_ok=True)
     for name in ("protein_ligand_contacts.csv", "protein_ligand_hbonds.csv", "residue_distances.csv"):
         (analysis_dir / name).unlink(missing_ok=True)
 
@@ -304,6 +322,7 @@ def analyze_run(output_dir, config, *, analysis_dir=None, preliminary_phase=None
             membrane_thickness_angstrom=mmpbsa_membrane_thickness_angstrom,
             membrane_dielectric=mmpbsa_membrane_dielectric,
             decomposition=mmpbsa_decomposition,
+            ligand=mmpbsa_ligand,
         )
         mmpbsa_plots = _plot_mmpbsa(
             analysis_dir, mmpbsa_dir / "FINAL_RESULTS_MMPBSA.csv",
@@ -381,6 +400,9 @@ def main():
     parser.add_argument("--mmpbsa", action="store_true", help="Also run gmx_MMPBSA")
     parser.add_argument("--mmpbsa-model", choices=("gb", "pb", "pb_mem"), default="gb")
     parser.add_argument("--mmpbsa-interval", type=int, default=1)
+    parser.add_argument("--mmpbsa-ligand",
+                        help="Ligand for the MMPBSA estimate: 1-based index (2), label (LIG2), "
+                             "or residue label; required when the run has several ligands")
     parser.add_argument("--mmpbsa-last-ns", type=float,
                         help="Restrict MMPBSA to the final N ns of production")
     parser.add_argument("--analysis-stride", type=int, default=10)
@@ -440,6 +462,7 @@ def main():
         mmpbsa_membrane_dielectric=args.mmpbsa_membrane_dielectric,
         analysis_stride=args.analysis_stride,
         mmpbsa_decomposition=args.mmpbsa_decomposition,
+        mmpbsa_ligand=args.mmpbsa_ligand,
         distance_pairs=args.distance_pair,
     )
     print(f"Analysis report: {result / 'report.html'}")

@@ -58,10 +58,15 @@ class AnalysisTests(unittest.TestCase):
                          root / "system_final.pdb", analysis / "trajectory_fitted.xtc"):
                 path.write_text("input")
             full_topology = MagicMock()
-            full_topology.select.return_value = [0, 1]
+            full_topology.select.return_value = [0]
             complex_topology = MagicMock()
             complex_topology.n_atoms = 2
             complex_topology.select.side_effect = [[0], [1]]
+            ligand_residue = MagicMock()
+            ligand_residue.name = "LIG"
+            ligand_residue.atoms = [SimpleNamespace(index=1)]
+            complex_topology.residues = [ligand_residue]
+            selection = {"label": "LIG1", "residue_label": "A:1:LIG", "atoms": [1]}
             complex_chunk = MagicMock()
             complex_chunk.xyz = "coordinates"
             complex_chunk.time = [0.0]
@@ -81,7 +86,9 @@ class AnalysisTests(unittest.TestCase):
                 with patch("prot_lig_runner.analysis.subprocess.run") as run:
                     run.return_value.returncode = 0
                     with patch.dict("sys.modules", {"mdtraj": md}):
-                        result = run_mmpbsa(root, analysis, interval=2)
+                        with patch("prot_lig_runner.analysis.resolve_ligand",
+                                   return_value=selection):
+                            result = run_mmpbsa(root, analysis, interval=2)
             self.assertEqual(result, analysis / "mmpbsa")
             input_text = (result / "mmpbsa.in").read_text()
             self.assertIn("interval=2", input_text)
@@ -125,10 +132,15 @@ class AnalysisTests(unittest.TestCase):
             }))
 
             full_topology = MagicMock()
-            full_topology.select.return_value = [0, 1]
+            full_topology.select.return_value = [0]
             complex_topology = MagicMock()
             complex_topology.n_atoms = 2
             complex_topology.select.side_effect = [[0], [1]]
+            ligand_residue = MagicMock()
+            ligand_residue.name = "LIG"
+            ligand_residue.atoms = [SimpleNamespace(index=1)]
+            complex_topology.residues = [ligand_residue]
+            selection = {"label": "LIG1", "residue_label": "A:1:LIG", "atoms": [1]}
             complex_chunk = MagicMock()
             complex_chunk.xyz = "coordinates"
             complex_chunk.time = [0.0]
@@ -147,9 +159,11 @@ class AnalysisTests(unittest.TestCase):
                 with patch("prot_lig_runner.analysis.subprocess.run") as run:
                     run.return_value.returncode = 0
                     with patch.dict("sys.modules", {"mdtraj": md}):
-                        result = run_mmpbsa(
-                            root, analysis, model="pb_mem", membrane_thickness_angstrom=30.0
-                        )
+                        with patch("prot_lig_runner.analysis.resolve_ligand",
+                                   return_value=selection):
+                            result = run_mmpbsa(
+                                root, analysis, model="pb_mem", membrane_thickness_angstrom=30.0
+                            )
 
             input_text = (result / "mmpbsa.in").read_text()
             self.assertIn("memopt=1", input_text)

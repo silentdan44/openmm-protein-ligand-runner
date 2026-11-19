@@ -66,7 +66,9 @@ For a larger TRPV4 run, replace the two fixture paths with `trpv4_receptor.pdb` 
 
 ## Inputs and membrane orientation
 
-Mount custom receptor and ligand files read-only, then pass their container paths with `--receptor` and `--ligand`. Repeat `--ligand` once per molecule to simulate a shared protein complex containing several ligands. Each SDF must contain exactly one molecule with a 3D conformer in the receptor's coordinate frame. All ligands are parameterized and receive the same staged restraint schedule; ligand interaction metrics in the report aggregate across them.
+Mount custom receptor and ligand files read-only, then pass their container paths with `--receptor` and `--ligand`. Repeat `--ligand` once per molecule to simulate a shared protein complex containing several ligands. Each SDF must contain exactly one molecule with a 3D conformer in the receptor's coordinate frame. All ligands are parameterized and receive the same staged restraint schedule.
+
+Ligands are labelled `LIG1`, `LIG2`, … in the order the `--ligand` flags were given, and every ligand is analyzed separately: the report gets one RMSD/contacts/hydrogen-bond plot per ligand plus a comparison plot, `metrics.json` gets a per-ligand summary, and `time_series.csv` gets `ligand_rmsd_nm:LIGn`, `ligand_rg_nm:LIGn`, `ligand_contacts:LIGn`, and `protein_ligand_hbonds:LIGn` columns. The contact and hydrogen-bond tables also carry a `ligand_residue` column. `analysis/index.ndx` still groups all ligands as `LIG` for GROMACS tools.
 
 ```bash
 --receptor /inputs/receptor.pdb \
@@ -93,7 +95,9 @@ The report includes simulation QC, protein stability and RMSF, ligand pose and p
 | Simulation QC | Temperature and potential energy over time; density and box volume during NPT. | When state samples are available. |
 | Protein stability | Whole-protein backbone RMSD; membrane-core Cα RMSD for membrane systems. | When trajectory metrics are available; membrane-core panel only for membrane systems. |
 | Protein RMSF | Per-residue Cα RMSF, with separate traces for protein chains. | When per-residue fluctuations can be calculated. |
-| Ligand pocket | Ligand RMSD after protein alignment, pocket-contact count, and protein–ligand hydrogen-bond count. | When trajectory metrics are available. |
+| Ligand pocket | Ligand RMSD after protein alignment, pocket-contact count, and protein–ligand hydrogen-bond count (all ligands together). | When trajectory metrics are available. |
+| Per-ligand pocket | One figure per ligand (`ligand_pocket_LIGn.png`) with that ligand's RMSD and its own contact/hydrogen-bond counts. | When trajectory metrics are available; one per LIG residue. |
+| Ligand comparison | RMSD and contact count of every ligand on shared axes. | When the run has more than one ligand. |
 | Contact occupancy | Up to 20 protein residues ranked by fraction of frames in contact with the ligand. | When ligand contacts are detected. |
 | Hydrogen-bond occupancy | Up to 20 protein–ligand hydrogen bonds ranked by fraction of frames. | When hydrogen bonds are detected. |
 | Membrane integrity | Area per lipid, phosphate-plane separation, and lipid counts in the two leaflets. | For membrane runs with measurable lipid geometry. |
@@ -129,6 +133,12 @@ Pass `--mmpbsa` during simulation to run single-trajectory gmx_MMPBSA after MD. 
 
 ```text
 --mmpbsa --mmpbsa-model gb --mmpbsa-last-ns 20 --mmpbsa-interval 10
+```
+
+gmx_MMPBSA estimates one binding affinity per calculation, so a run with several ligands needs `--mmpbsa-ligand`. It accepts the 1-based `--ligand` order (`2`), the label (`LIG2`), or the residue label printed in the report (`A:123:LIG`). With several ligands and no selection the run stops with the list of available ligands; with exactly one ligand the selection is inferred.
+
+```text
+--mmpbsa --mmpbsa-ligand 2
 ```
 
 Omit `--mmpbsa-last-ns` to use all production frames. If the requested window exceeds the available trajectory, all available production frames are used and a warning is logged. `--mmpbsa-interval` samples frames for MMPBSA; `--analysis-stride` independently controls frames loaded for trajectory metrics and plots. Choose `gb`, `pb`, or (for a membrane run) `pb_mem`; `pb_mem` also requires `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0.

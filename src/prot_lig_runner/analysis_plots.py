@@ -186,10 +186,51 @@ def _plot_trajectory(output_dir, data):
         _axis(axes[1], "Ligand pocket contacts", "Count")
         return fig
 
+    def ligand_single(ligand_data):
+        def draw(plt):
+            label = ligand_data["label"]
+            fig, axes = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True)
+            axes[0].plot(time, ligand_data["rmsd_nm"], color="#dc2626", linewidth=1)
+            _axis(axes[0], f"{label} ({ligand_data['residue']}) RMSD after protein alignment", "nm")
+            axes[1].plot(time, ligand_data["contacts"], color="#c2410c", linewidth=1,
+                         label="Protein residues within 0.45 nm")
+            axes[1].plot(time, ligand_data["hbonds"], color="#7c3aed", linewidth=1,
+                         label="Hydrogen bonds")
+            axes[1].legend(frameon=False)
+            _axis(axes[1], f"{label} pocket contacts", "Count")
+            return fig
+        return draw
+
+    def ligand_comparison(ligands):
+        def draw(plt):
+            fig, axes = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True)
+            colors = ["#dc2626", "#2563eb", "#059669", "#d97706", "#7c3aed", "#0891b2"]
+            for index, ligand_data in enumerate(ligands):
+                color = colors[index % len(colors)]
+                axes[0].plot(time, ligand_data["rmsd_nm"], color=color, linewidth=1,
+                             label=ligand_data["label"])
+                axes[1].plot(time, ligand_data["contacts"], color=color, linewidth=1,
+                             label=ligand_data["label"])
+            axes[0].legend(frameon=False)
+            _axis(axes[0], "Ligand RMSD after protein alignment", "nm")
+            axes[1].legend(frameon=False)
+            _axis(axes[1], "Protein residues within 0.45 nm of each ligand", "Count")
+            return fig
+        return draw
+
     for name, draw in (("protein_stability.png", stability),
                        ("protein_rmsf.png", rmsf), ("ligand_pocket.png", ligand)):
         if _save_optional_plot(output_dir, name, draw):
             generated.append(name)
+
+    ligands = data.get("ligands", [])
+    for ligand_data in ligands:
+        name = f"ligand_pocket_{ligand_data['label']}.png"
+        if _save_optional_plot(output_dir, name, ligand_single(ligand_data)):
+            generated.append(name)
+    if len(ligands) > 1:
+        if _save_optional_plot(output_dir, "ligand_comparison.png", ligand_comparison(ligands)):
+            generated.append("ligand_comparison.png")
 
     contacts = data.get("contact_occupancy", [])
     if contacts:
@@ -408,10 +449,32 @@ def _read_decomposition(path):
 
 def build_report(output_dir, metrics, generated_plots, *, warnings=None):
     output_dir = Path(output_dir)
+    trajectory_metrics = metrics.get("trajectory_metrics", {})
     summary_items = "".join(
         f"<li><strong>{html.escape(key.replace('_', ' '))}:</strong> {value:.3f}</li>"
-        for key, value in metrics.get("trajectory_metrics", {}).items()
+        for key, value in trajectory_metrics.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
     )
+    ligand_stats = trajectory_metrics.get("ligands") or {}
+    ligand_table = ""
+    if ligand_stats:
+        rows = "".join(
+            "<tr>"
+            f"<td>{html.escape(label)}</td>"
+            f"<td>{html.escape(str(stats.get('residue', '')))}</td>"
+            f"<td>{stats.get('ligand_rmsd_nm_mean', float('nan')):.3f}</td>"
+            f"<td>{stats.get('ligand_rg_nm_mean', float('nan')):.3f}</td>"
+            f"<td>{stats.get('ligand_contacts_mean', float('nan')):.1f}</td>"
+            f"<td>{stats.get('protein_ligand_hbonds_mean', float('nan')):.1f}</td>"
+            "</tr>"
+            for label, stats in ligand_stats.items()
+        )
+        ligand_table = (
+            "<h2>Per-ligand summary</h2>"
+            "<table><thead><tr><th>Ligand</th><th>Residue</th><th>RMSD mean (nm)</th>"
+            "<th>Rg mean (nm)</th><th>Contacts mean</th><th>H-bonds mean</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>"
+        )
     notes = "".join(f"<li>{html.escape(note)}</li>" for note in (warnings or []))
     links = "\n".join(
         f'<section><h2>{html.escape(Path(name).stem.replace("_", " ").title())}</h2>'
@@ -421,13 +484,15 @@ def build_report(output_dir, metrics, generated_plots, *, warnings=None):
     report = "".join((
         "<!doctype html><meta charset='utf-8'><title>MD analysis report</title>",
         "<style>body{font:16px system-ui;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#172033}"
-        "img{border:1px solid #dbe2ea;border-radius:8px;max-width:100%}section{margin:2rem 0}</style>",
+        "img{border:1px solid #dbe2ea;border-radius:8px;max-width:100%}section{margin:2rem 0}"
+        "table{border-collapse:collapse;margin:1rem 0}th,td{border:1px solid #dbe2ea;padding:.35rem .6rem;text-align:left}</style>",
         "<h1>Protein–ligand MD analysis</h1>",
         "<p><strong>PRELIMINARY REPORT</strong> — simulation is ongoing; results may change.</p>"
         if metrics.get("preliminary") else "",
         f"<p>Production frames analyzed: {metrics.get('frame_count', 0)}; "
         f"state samples: {metrics.get('state_sample_count', 0)}.</p>",
         f"<ul>{summary_items}</ul>" if summary_items else "",
+        ligand_table,
         "<p>Frame-to-frame spread is descriptive; frames are correlated and do not replace independent replicas.</p>",
         f"<h2>Analysis notes</h2><ul>{notes}</ul>" if notes else "",
         links if links else "<p>No optional plots were available for this run.</p>",
