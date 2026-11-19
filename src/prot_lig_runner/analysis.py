@@ -12,10 +12,24 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .analysis_metrics import resolve_ligand, trajectory_metrics
-from .analysis_plots import PLOT_FILES, _plot_mmpbsa, _plot_qc, _plot_trajectory, build_report
+from .analysis_metrics import (
+    estimate_membrane_planes,
+    resolve_ligand,
+    trajectory_metrics,
+)
+from .analysis_plots import (
+    PLOT_FILES,
+    _plot_mmpbsa,
+    _plot_mmpbsa_entropy,
+    _plot_qc,
+    _plot_trajectory,
+    build_report,
+    plot_membrane_planes,
+    read_mmpbsa_delta_csv,
+)
 
 logger = logging.getLogger(__name__)
+K_B_KCAL_PER_MOL_K = 0.00198720425864083
 
 
 def read_state_data(path):
@@ -32,6 +46,82 @@ def read_state_data(path):
             except (TypeError, ValueError):
                 continue
     return rows
+
+
+def interaction_entropy(electrostatics_kcal, temperature_k):
+    """Estimate -TΔS by the interaction-entropy method (Duan et al.).
+
+    −TΔS = kT ln⟨exp(ΔE_el/kT)⟩ over the sampled frames, where ΔE_el is the
+    protein–ligand electrostatic interaction energy. Uses a shifted log-mean-exp
+    so strong favourable energies do not underflow.
+    """
+    import numpy as np
+
+    values = np.asarray(electrostatics_kcal, dtype=float)
+    if values.size == 0:
+        raise ValueError("Interaction entropy needs at least one frame")
+    kt = K_B_KCAL_PER_MOL_K * float(temperature_k)
+    maximum = float(values.max())
+    minus_tds = maximum + kt * float(np.log(np.mean(np.exp((values - maximum) / kt))))
+    return float(minus_tds)
+
+
+def summarize_mmpbsa(path, *, temperature_k=300.0, entropy="ie"):
+    """Summarise per-frame MMPBSA terms, add interaction entropy and errors."""
+    import numpy as np
+
+    rows = read_mmpbsa_delta_csv(path)
+    if not rows:
+        raise ValueError(f"No per-frame MMPBSA terms found in {path}")
+    frame_key = next(key for key in rows[0] if key.lower().startswith("frame"))
+    total_key = "TOTAL" if "TOTAL" in rows[0] else None
+    eel_key = "EEL" if "EEL" in rows[0] else None
+    if total_key is None or eel_key is None:
+        raise ValueError("MMPBSA CSV has no TOTAL/EEL columns in the Delta section")
+    frames = np.asarray([row[frame_key] for row in rows], dtype=float)
+    enthalpy = np.asarray([row[total_key] for row in rows], dtype=float)
+    eel = np.asarray([row[eel_key] for row in rows], dtype=float)
+
+    running_enthalpy = np.cumsum(enthalpy) / np.arange(1, len(enthalpy) + 1)
+    running_entropy = np.asarray(
+        [interaction_entropy(eel[: index + 1], temperature_k) for index in range(len(eel))]
+    ) if entropy == "ie" else np.zeros(len(eel))
+    running_free = running_enthalpy + running_entropy
+
+    def sem(values):
+        return float(np.std(values, ddof=1) / np.sqrt(len(values))) if len(values) > 1 else float("nan")
+
+    def block_sem(values, blocks=5):
+        if len(values) < 2 * blocks:
+            return float("nan")
+        chunks = np.array_split(values, blocks)
+        estimates = [interaction_entropy(chunk, temperature_k) for chunk in chunks]
+        return float(np.std(estimates, ddof=1) / np.sqrt(blocks))
+
+    delta_h = float(enthalpy.mean())
+    minus_tds = float(running_entropy[-1]) if entropy == "ie" else 0.0
+    sem_h = sem(enthalpy)
+    sem_tds = block_sem(eel) if entropy == "ie" else 0.0
+    delta_g = delta_h + minus_tds
+    sem_g = float(np.sqrt(sem_h ** 2 + (sem_tds if np.isfinite(sem_tds) else 0.0) ** 2))
+    return {
+        "entropy_method": entropy,
+        "temperature_k": float(temperature_k),
+        "frame_count": int(len(frames)),
+        "frames": frames.tolist(),
+        "delta_h_kcal_mol": enthalpy.tolist(),
+        "delta_eel_kcal_mol": eel.tolist(),
+        "minus_tds_kcal_mol": running_entropy.tolist(),
+        "delta_g_running_kcal_mol": running_free.tolist(),
+        "delta_h_mean_kcal_mol": delta_h,
+        "minus_tds_kcal_mol_value": minus_tds,
+        "delta_g_kcal_mol": float(delta_g),
+        "sem_delta_h_kcal_mol": sem_h,
+        "sem_minus_tds_kcal_mol": sem_tds,
+        "sem_delta_g_kcal_mol": sem_g,
+        "note": "Single-trajectory MM/PBSA enthalpy plus interaction entropy; an "
+                "approximate end-state estimate, not a calibrated absolute free energy.",
+    }
 
 
 def write_index_file(path, protein_indices, ligand_indices):
@@ -72,6 +162,32 @@ def _mmpbsa_window_bounds(trajectory_path, topology_path, last_ns):
     return cutoff
 
 
+def _wrap_selection_into_box(trajectory):
+    """Translate each frame so the selected complex sits in the box centre.
+
+    The analysis unwraps trajectories for RMSD; gmx_MMPBSA expects the complex
+    inside the box for its focusing/PB grid, so shift the whole selection by one
+    lattice vector per frame instead of wrapping individual atoms.
+    """
+    import numpy as np
+
+    boxes = trajectory.unitcell_vectors
+    if boxes is None:
+        return
+    try:
+        boxes = np.asarray(boxes, dtype=float)
+        xyz = np.asarray(trajectory.xyz, dtype=float)
+    except (TypeError, ValueError):
+        return
+    if boxes.ndim != 3 or xyz.ndim != 3:
+        return
+    for frame in range(min(len(xyz), len(boxes))):
+        inverse = np.linalg.inv(boxes[frame])
+        fractional = trajectory.xyz[frame].mean(axis=0) @ inverse
+        shift = (0.5 - fractional) @ boxes[frame]
+        trajectory.xyz[frame] += shift
+
+
 def _copy_mmpbsa_window(source_path, topology_path, target_path, *, last_ns,
                         atom_indices=None):
     """Write a production trajectory window, optionally reduced to selected atoms."""
@@ -88,6 +204,7 @@ def _copy_mmpbsa_window(source_path, topology_path, target_path, *, last_ns,
                 continue
             if atom_indices is not None:
                 selected = selected.atom_slice(atom_indices)
+                _wrap_selection_into_box(selected)
             writer.write(selected.xyz, time=selected.time,
                          box=selected.unitcell_vectors)
             frames_written += selected.n_frames
@@ -98,7 +215,7 @@ def _copy_mmpbsa_window(source_path, topology_path, target_path, *, last_ns,
 
 def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None,
                membrane_thickness_angstrom=None, membrane_dielectric=7.0,
-               decomposition=False, ligand=None):
+               decomposition=False, ligand=None, temperature_k=300.0, entropy="ie"):
     """Run a single-trajectory gmx_MMPBSA estimate, optionally with decomposition."""
     executable = shutil.which("gmx_MMPBSA")
     if executable is None:
@@ -126,6 +243,32 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
         raise ValueError("The MMPBSA last-ns window must be a positive finite number")
     model_namelist = "&gb\n igb=5, saltcon=0.150,\n/\n" if model == "gb" else "&pb\n istrng=0.150,\n/\n"
     if model == "pb_mem":
+        if membrane_thickness_angstrom is None:
+            import mdtraj as md
+
+            structure = md.load_pdb(str(output_dir / "system_final.pdb"))
+            state = json.loads((output_dir / "run_state.json").read_text())
+            configuration = state["configuration"]
+            estimate = estimate_membrane_planes(
+                structure.topology,
+                structure.xyz[0],
+                center_z_nm=configuration.get("membrane_center_z_nm") or 0.0,
+                lipid_type=configuration.get("lipid_type", "POPC"),
+            )
+            membrane_thickness_angstrom = estimate["thickness_angstrom"]
+            plot_membrane_planes(analysis_dir, estimate, filename="mmpbsa_membrane_planes.png")
+            (mmpbsa_dir / "membrane_planes.json").write_text(
+                json.dumps({key: value for key, value in estimate.items()
+                            if key not in ("atom_indices", "atom_z_nm")}, indent=2, sort_keys=True) + "\n"
+            )
+            logger.info(
+                "Auto membrane thickness %.2f A from %d/%d phosphorus atoms "
+                "(%d outliers rejected)",
+                membrane_thickness_angstrom,
+                estimate["lower_atom_count"],
+                estimate["upper_atom_count"],
+                estimate["outlier_count"],
+            )
         if (membrane_thickness_angstrom is None
                 or not math.isfinite(float(membrane_thickness_angstrom))
                 or float(membrane_thickness_angstrom) <= 0):
@@ -198,6 +341,7 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
             with md.formats.XTCTrajectoryFile(str(complex_trajectory_path), mode="w") as writer:
                 for chunk in md.iterload(str(source_trajectory), top=str(output_dir / "system_final.pdb"), chunk=1000):
                     selected = chunk.atom_slice(full_complex_indices)
+                    _wrap_selection_into_box(selected)
                     writer.write(selected.xyz, time=selected.time, box=selected.unitcell_vectors)
                     frames_written += selected.n_frames
             if frames_written == 0:
@@ -248,13 +392,32 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
                                    text=True, check=False)
     if completed.returncode != 0:
         raise RuntimeError(f"gmx_MMPBSA failed with exit code {completed.returncode}; see {mmpbsa_dir / 'gmx_MMPBSA.log'}")
+    try:
+        summary = summarize_mmpbsa(
+            mmpbsa_dir / "FINAL_RESULTS_MMPBSA.csv",
+            temperature_k=temperature_k,
+            entropy=entropy,
+        )
+    except Exception as error:
+        logger.warning("MMPBSA finished but entropy summarisation failed: %s", error)
+    else:
+        (mmpbsa_dir / "entropy.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n"
+        )
+        _plot_mmpbsa_entropy(analysis_dir, summary)
+        logger.info(
+            "MMPBSA: dH = %.2f, -TdS = %.2f, dG = %.2f kcal/mol over %d frames (%s)",
+            summary["delta_h_mean_kcal_mol"], summary["minus_tds_kcal_mol_value"],
+            summary["delta_g_kcal_mol"], summary["frame_count"], entropy,
+        )
     return mmpbsa_dir
 
 
 def analyze_run(output_dir, config, *, analysis_dir=None, preliminary_phase=None, perform_mmpbsa=False, mmpbsa_model="gb",
                 mmpbsa_interval=1, mmpbsa_last_ns=None, mmpbsa_membrane_thickness_angstrom=None,
                 mmpbsa_membrane_dielectric=7.0, mmpbsa_decomposition=False,
-                analysis_stride=10, distance_pairs=None, mmpbsa_ligand=None):
+                analysis_stride=10, distance_pairs=None, mmpbsa_ligand=None,
+                mmpbsa_entropy="ie"):
     output_dir = Path(output_dir)
     analysis_dir = Path(analysis_dir) if analysis_dir is not None else output_dir / "analysis"
     analysis_dir.mkdir(parents=True, exist_ok=True)
@@ -323,12 +486,23 @@ def analyze_run(output_dir, config, *, analysis_dir=None, preliminary_phase=None
             membrane_dielectric=mmpbsa_membrane_dielectric,
             decomposition=mmpbsa_decomposition,
             ligand=mmpbsa_ligand,
+            temperature_k=float(config.get("temperature_k") or 300.0),
+            entropy=mmpbsa_entropy,
         )
         mmpbsa_plots = _plot_mmpbsa(
             analysis_dir, mmpbsa_dir / "FINAL_RESULTS_MMPBSA.csv",
             mmpbsa_dir / "FINAL_DECOMP_MMPBSA.csv" if mmpbsa_decomposition else None,
         )
         generated.extend(mmpbsa_plots)
+        entropy_path = mmpbsa_dir / "entropy.json"
+        if entropy_path.is_file():
+            summary = json.loads(entropy_path.read_text())
+            metrics["mmpbsa"] = {
+                key: value for key, value in summary.items() if not isinstance(value, list)
+            }
+            for name in ("mmpbsa_entropy.png", "mmpbsa_membrane_planes.png"):
+                if (analysis_dir / name).is_file() and name not in generated:
+                    generated.append(name)
         if not mmpbsa_plots:
             warnings.append("MMPBSA completed, but its CSV contained no supported frame table for plotting.")
     elif (analysis_dir / "mmpbsa" / "FINAL_RESULTS_MMPBSA.csv").is_file():
@@ -403,6 +577,8 @@ def main():
     parser.add_argument("--mmpbsa-ligand",
                         help="Ligand for the MMPBSA estimate: 1-based index (2), label (LIG2), "
                              "or residue label; required when the run has several ligands")
+    parser.add_argument("--mmpbsa-entropy", choices=("ie", "none"), default="ie",
+                        help="Entropy correction: interaction entropy (default) or enthalpy only")
     parser.add_argument("--mmpbsa-last-ns", type=float,
                         help="Restrict MMPBSA to the final N ns of production")
     parser.add_argument("--analysis-stride", type=int, default=10)
@@ -425,11 +601,11 @@ def main():
     if args.analysis_stride < 1:
         parser.error("--analysis-stride must be a positive integer")
     if args.mmpbsa and args.mmpbsa_model == "pb_mem" and (
-        args.mmpbsa_membrane_thickness_angstrom is None
-        or not math.isfinite(args.mmpbsa_membrane_thickness_angstrom)
-        or args.mmpbsa_membrane_thickness_angstrom <= 0
+        args.mmpbsa_membrane_thickness_angstrom is not None
+        and (not math.isfinite(args.mmpbsa_membrane_thickness_angstrom)
+             or args.mmpbsa_membrane_thickness_angstrom <= 0)
     ):
-        parser.error("pb_mem requires a positive --mmpbsa-membrane-thickness-angstrom")
+        parser.error("--mmpbsa-membrane-thickness-angstrom must be positive when given")
     if args.mmpbsa and args.mmpbsa_model == "pb_mem" and (
         not math.isfinite(args.mmpbsa_membrane_dielectric)
         or args.mmpbsa_membrane_dielectric <= 0
@@ -463,6 +639,7 @@ def main():
         analysis_stride=args.analysis_stride,
         mmpbsa_decomposition=args.mmpbsa_decomposition,
         mmpbsa_ligand=args.mmpbsa_ligand,
+        mmpbsa_entropy=args.mmpbsa_entropy,
         distance_pairs=args.distance_pair,
     )
     print(f"Analysis report: {result / 'report.html'}")

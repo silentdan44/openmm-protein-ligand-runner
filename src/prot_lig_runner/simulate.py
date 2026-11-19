@@ -133,10 +133,13 @@ def parse_args():
     )
     parser.add_argument("--mmpbsa-last-ns", type=positive_float,
                         help="Restrict MMPBSA to the final N ns of production")
+    parser.add_argument("--mmpbsa-entropy", choices=("ie", "none"), default="ie",
+                        help="Entropy correction for MMPBSA: interaction entropy (default) or none")
     parser.add_argument("--analysis-stride", type=positive_int, default=10,
                         help="Load every Nth XTC frame for plots and the prepared MMPBSA trajectory")
     parser.add_argument("--mmpbsa-membrane-thickness-angstrom", type=positive_float,
-                        help="Required membrane slab thickness for --mmpbsa-model pb_mem")
+                        help="Membrane slab thickness for pb_mem; by default estimated from the "
+                             "lipid phosphate planes of the built system")
     parser.add_argument("--mmpbsa-membrane-dielectric", type=positive_float, default=7.0,
                         help="Membrane dielectric used by the pb_mem model (default: 7)")
     parser.add_argument(
@@ -163,8 +166,6 @@ def parse_args():
                 parser.error("--manual-membrane-normal must be nonzero")
         elif args.manual_membrane_normal is not None or args.manual_membrane_center_angstrom is not None:
             parser.error("manual orientation parameters are only valid with --orientation manual")
-    if args.mmpbsa and args.mmpbsa_model == "pb_mem" and args.mmpbsa_membrane_thickness_angstrom is None:
-        parser.error("--mmpbsa-model pb_mem requires --mmpbsa-membrane-thickness-angstrom")
     if args.mmpbsa and args.mmpbsa_model == "pb_mem" and not args.membrane:
         parser.error("--mmpbsa-model pb_mem is only valid with --membrane")
     return args
@@ -1378,6 +1379,7 @@ def main():
                     analysis_stride=args.analysis_stride,
                     mmpbsa_decomposition=args.mmpbsa_decomposition,
                     mmpbsa_ligand=args.mmpbsa_ligand,
+                    mmpbsa_entropy=args.mmpbsa_entropy,
                     distance_pairs=args.distance_pair,
                 )
                 break

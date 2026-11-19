@@ -447,6 +447,68 @@ def _read_decomposition(path):
     return result or None
 
 
+def plot_membrane_planes(output_dir, estimate, *, filename="membrane_planes.png"):
+    """Draw the phosphorus z distribution used to pick the membrane planes."""
+
+    def draw(plt):
+        import numpy as np
+
+        z = np.asarray(estimate["atom_z_nm"], dtype=float)
+        index = np.asarray(estimate["atom_indices"], dtype=int)
+        outliers = {item["index"] for item in estimate.get("outliers", [])}
+        keep = np.array([idx not in outliers for idx in index])
+        fig, axes = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True)
+        axes[0].scatter(index[keep], z[keep], s=6, color="#2563eb", label="phosphorus atoms")
+        if (~keep).any():
+            axes[0].scatter(index[~keep], z[~keep], s=18, color="#dc2626", marker="x",
+                            label="outliers (rejected)")
+        axes[0].axhline(estimate["lower_plane_nm"], color="#0f766e", linestyle="--", linewidth=1)
+        axes[0].axhline(estimate["upper_plane_nm"], color="#0f766e", linestyle="--", linewidth=1)
+        axes[0].annotate(
+            f"thickness {estimate['thickness_angstrom']:.1f} A",
+            xy=(index.min(), 0.0), xytext=(index.min(), (estimate["upper_plane_nm"] + estimate["lower_plane_nm"]) / 2),
+            color="#0f766e",
+        )
+        axes[0].legend(frameon=False, fontsize=8)
+        _axis(axes[0], f"Membrane phosphate planes ({estimate['lipid_type']})",
+              "z - membrane center (nm)", "Phosphorus atom index")
+
+        bins = max(10, min(60, len(z) // 4))
+        axes[1].hist(z, bins=bins, color="#93c5fd", edgecolor="white")
+        axes[1].axvline(estimate["lower_plane_nm"], color="#0f766e", linestyle="--", linewidth=1)
+        axes[1].axvline(estimate["upper_plane_nm"], color="#0f766e", linestyle="--", linewidth=1)
+        _axis(axes[1], "Phosphorus z distribution", "Count", "z - membrane center (nm)")
+        return fig
+
+    return _save_optional_plot(output_dir, filename, draw)
+
+
+def _plot_mmpbsa_entropy(output_dir, summary):
+    """Plot running enthalpy/entropy/free-energy estimates from MMPBSA frames."""
+
+    def draw(plt):
+        import numpy as np
+
+        frames = np.asarray(summary["frames"], dtype=float)
+        delta_h = np.asarray(summary["delta_h_kcal_mol"], dtype=float)
+        minus_tds = np.asarray(summary["minus_tds_kcal_mol"], dtype=float)
+        delta_g = np.asarray(summary["delta_g_running_kcal_mol"], dtype=float)
+        fig, axes = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True)
+        axes[0].plot(frames, delta_h, color="#2563eb", linewidth=1, label="ΔH (MM/PBSA)")
+        axes[0].plot(frames, minus_tds, color="#dc2626", linewidth=1, label="−TΔS (IE)")
+        axes[0].plot(frames, delta_g, color="#0f766e", linewidth=1.5, label="ΔG estimate")
+        axes[0].legend(frameon=False, fontsize=8)
+        _axis(axes[0], "Running MMPBSA estimates", "kcal/mol", "Frame")
+        axes[1].hist(
+            np.asarray(summary["delta_eel_kcal_mol"], dtype=float),
+            bins=max(5, min(40, len(frames))), color="#c4b5fd", edgecolor="white",
+        )
+        _axis(axes[1], "Per-frame electrostatic interaction energy", "Count", "ΔEEL (kcal/mol)")
+        return fig
+
+    return _save_optional_plot(output_dir, "mmpbsa_entropy.png", draw)
+
+
 def build_report(output_dir, metrics, generated_plots, *, warnings=None):
     output_dir = Path(output_dir)
     trajectory_metrics = metrics.get("trajectory_metrics", {})
@@ -475,6 +537,27 @@ def build_report(output_dir, metrics, generated_plots, *, warnings=None):
             "<th>Rg mean (nm)</th><th>Contacts mean</th><th>H-bonds mean</th></tr></thead>"
             f"<tbody>{rows}</tbody></table>"
         )
+    mmpbsa = metrics.get("mmpbsa") or {}
+    mmpbsa_table = ""
+    if mmpbsa:
+        def number(key):
+            value = mmpbsa.get(key)
+            return "—" if value is None or not isinstance(value, (int, float)) else f"{value:.2f}"
+
+        mmpbsa_table = (
+            "<h2>MMPBSA free-energy estimate</h2>"
+            "<table><thead><tr><th>ΔH (kcal/mol)</th><th>−TΔS (kcal/mol)</th>"
+            "<th>ΔG (kcal/mol)</th><th>SEM ΔG</th><th>Frames</th><th>Entropy</th></tr></thead>"
+            f"<tbody><tr><td>{number('delta_h_mean_kcal_mol')}</td>"
+            f"<td>{number('minus_tds_kcal_mol_value')}</td>"
+            f"<td>{number('delta_g_kcal_mol')}</td>"
+            f"<td>{number('sem_delta_g_kcal_mol')}</td>"
+            f"<td>{mmpbsa.get('frame_count', '—')}</td>"
+            f"<td>{html.escape(str(mmpbsa.get('entropy_method', '—')))}</td></tr></tbody></table>"
+            "<p>Single-trajectory MM/PBSA enthalpy plus interaction entropy. This is an "
+            "approximate end-state estimate, useful for ranking ligands under one protocol, "
+            "not a calibrated absolute binding free energy.</p>"
+        )
     notes = "".join(f"<li>{html.escape(note)}</li>" for note in (warnings or []))
     links = "\n".join(
         f'<section><h2>{html.escape(Path(name).stem.replace("_", " ").title())}</h2>'
@@ -493,6 +576,7 @@ def build_report(output_dir, metrics, generated_plots, *, warnings=None):
         f"state samples: {metrics.get('state_sample_count', 0)}.</p>",
         f"<ul>{summary_items}</ul>" if summary_items else "",
         ligand_table,
+        mmpbsa_table,
         "<p>Frame-to-frame spread is descriptive; frames are correlated and do not replace independent replicas.</p>",
         f"<h2>Analysis notes</h2><ul>{notes}</ul>" if notes else "",
         links if links else "<p>No optional plots were available for this run.</p>",

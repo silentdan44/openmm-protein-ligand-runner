@@ -296,6 +296,75 @@ def _image_to_reference(trajectory):
             block[offset] += np.repeat(shift, counts, axis=0)
 
 
+def estimate_membrane_planes(topology, xyz, *, center_z_nm=0.0, lipid_type="POPC"):
+    """Estimate bilayer phosphate planes from the built structure.
+
+    Returns median z of the phosphorus atoms in each leaflet (relative to
+    ``center_z_nm``), the plane separation, and the atoms rejected as outliers.
+    A median with a MAD cut is used because a single flipped lipid or a
+    mis-assigned phosphate would move a mean by nanometres and silently change
+    the MMPBSA membrane thickness.
+    """
+    import numpy as np
+
+    names = {lipid_type, lipid_type[:3]}
+    indices, z_values = [], []
+    for residue in _iter_residues(topology):
+        if residue.name not in names:
+            continue
+        for atom in _iter_atoms(residue):
+            if atom.name.strip().upper() == "P":
+                indices.append(atom.index)
+                z_values.append(float(xyz[atom.index, 2]) - float(center_z_nm))
+    if len(indices) < 4:
+        raise ValueError(
+            f"Found {len(indices)} lipid phosphorus atoms; need at least 4 to estimate "
+            "the membrane planes"
+        )
+    z = np.asarray(z_values)
+    lower_mask, upper_mask = z < 0.0, z > 0.0
+    if not lower_mask.any() or not upper_mask.any():
+        raise ValueError("Lipid phosphorus atoms do not populate both membrane leaflets")
+
+    def robust_plane(values):
+        median = float(np.median(values))
+        mad = float(np.median(np.abs(values - median)))
+        scale = 1.4826 * mad
+        if scale > 0:
+            keep = np.abs(values - median) <= 3.0 * scale
+        else:
+            keep = np.ones(len(values), dtype=bool)
+        return float(np.median(values[keep])), keep
+
+    lower_plane, lower_keep = robust_plane(z[lower_mask])
+    upper_plane, upper_keep = robust_plane(z[upper_mask])
+    lower_indices = np.asarray(indices)[lower_mask]
+    upper_indices = np.asarray(indices)[upper_mask]
+    outliers = [
+        {"index": int(index), "z_nm": float(value), "leaflet": "lower"}
+        for index, value, keep in zip(lower_indices, z[lower_mask], lower_keep)
+        if not keep
+    ] + [
+        {"index": int(index), "z_nm": float(value), "leaflet": "upper"}
+        for index, value, keep in zip(upper_indices, z[upper_mask], upper_keep)
+        if not keep
+    ]
+    return {
+        "lipid_type": lipid_type,
+        "center_z_nm": float(center_z_nm),
+        "lower_plane_nm": lower_plane,
+        "upper_plane_nm": upper_plane,
+        "thickness_nm": upper_plane - lower_plane,
+        "thickness_angstrom": 10.0 * (upper_plane - lower_plane),
+        "lower_atom_count": int(lower_keep.sum()),
+        "upper_atom_count": int(upper_keep.sum()),
+        "outlier_count": len(outliers),
+        "outliers": outliers,
+        "atom_indices": [int(index) for index in indices],
+        "atom_z_nm": z.tolist(),
+    }
+
+
 def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, analysis_stride=10,
                        distance_pairs=None):
     import mdtraj as md

@@ -105,18 +105,6 @@ class AnalysisTests(unittest.TestCase):
             self.assertEqual(command[command.index("-cg") + 1:command.index("-cg") + 3],
                              ["Protein", "LIG"])
 
-    def test_pb_mem_requires_explicit_membrane_thickness(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            analysis = root / "analysis"
-            analysis.mkdir()
-            for path in (root / "mmpbsa_complex.top", root / "mmpbsa_complex.pdb",
-                         root / "system_final.pdb", analysis / "trajectory_fitted.xtc"):
-                path.write_text("input")
-            with patch("prot_lig_runner.analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
-                with self.assertRaisesRegex(ValueError, "membrane thickness"):
-                    run_mmpbsa(root, analysis, model="pb_mem")
-
     def test_pb_mem_requests_compatible_amber_pb_solver(self):
         import json
 
