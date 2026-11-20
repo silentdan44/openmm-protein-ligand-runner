@@ -145,6 +145,8 @@ gmx_MMPBSA estimates one binding affinity per calculation, so a run with several
 
 Omit `--mmpbsa-last-ns` to use all production frames. If the requested window exceeds the available trajectory, all available production frames are used and a warning is logged. `--mmpbsa-interval` samples frames for MMPBSA; `--analysis-stride` independently controls frames loaded for trajectory metrics and plots. Choose `gb`, `pb`, or (for a membrane run) `pb_mem`; `pb_mem` derives the membrane thickness from the phosphate planes unless you pass `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0.
 
+gmx_MMPBSA treats water and lipids implicitly, so the MMPBSA ionic strength is taken from the MD configuration (`ionic_strength_molar`): `saltcon` for `gb`, `istrng` for `pb`/`pb_mem`, and `nmode_istrng` for normal mode. An explicit 0.0 stays zero; results written before this setting existed fall back to 0.15 M, matching the old hard-coded value.
+
 MMPBSA treats water and lipids implicitly while using the full membrane MD trajectory to extract protein and ligand atoms. Results include `analysis/mmpbsa/FINAL_RESULTS_MMPBSA.dat`, `.csv`, `entropy.json`, and `gmx_MMPBSA.log`. The report gives ΔH (MM/PBSA enthalpy) and ΔG = ΔH − TΔS. `--mmpbsa-entropy` selects the entropy estimate:
 
 - `ie` (default): interaction entropy, −TΔS = kT ln⟨exp(ΔE/kT)⟩ − ⟨ΔE⟩, using only the fluctuation of the protein–ligand interaction energy.

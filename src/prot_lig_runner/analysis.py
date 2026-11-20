@@ -342,9 +342,20 @@ def _copy_mmpbsa_window(source_path, topology_path, target_path, *, last_ns,
     return frames_written
 
 
+def ionic_strength_from_config(config):
+    """MMPBSA ionic strength in mol/L, taken from the MD configuration.
+
+    Older runs may not record the value; the historical 0.15 M default is used
+    only when the key is absent, while an explicit 0.0 stays zero.
+    """
+    value = (config or {}).get("ionic_strength_molar")
+    return 0.15 if value is None else float(value)
+
+
 def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None,
                membrane_thickness_angstrom=None, membrane_dielectric=7.0,
-               decomposition=False, ligand=None, temperature_k=300.0, entropy="ie"):
+               decomposition=False, ligand=None, temperature_k=300.0, entropy="ie",
+               salt_molar=0.150):
     """Run a single-trajectory gmx_MMPBSA estimate, optionally with decomposition."""
     executable = shutil.which("gmx_MMPBSA")
     if executable is None:
@@ -370,7 +381,15 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
         raise ValueError(f"Unsupported MMPBSA model: {model}")
     if last_ns is not None and (not math.isfinite(float(last_ns)) or float(last_ns) <= 0):
         raise ValueError("The MMPBSA last-ns window must be a positive finite number")
-    model_namelist = "&gb\n igb=5, saltcon=0.150,\n/\n" if model == "gb" else "&pb\n istrng=0.150,\n/\n"
+    # The MMPBSA ionic strength follows the MD configuration, so the implicit
+    # solvent screens charges at the same salt concentration as the simulation.
+    salt = float(salt_molar)
+    if not math.isfinite(salt) or salt < 0:
+        raise ValueError("The MMPBSA ionic strength must be a non-negative finite number")
+    model_namelist = (
+        f"&gb\n igb=5, saltcon={salt:g},\n/\n" if model == "gb"
+        else f"&pb\n istrng={salt:g},\n/\n"
+    )
     if model == "pb_mem":
         if membrane_thickness_angstrom is None:
             import mdtraj as md
@@ -411,7 +430,7 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
         model_namelist = (
             "&pb\n memopt=1, emem=" + f"{membrane_dielectric:g}" + ", indi=4.0, "
             + f"mctrdz={center_z_angstrom:g}, mthick={membrane_thickness_angstrom:g}, "
-            + "poretype=1, radiopt=0, istrng=0.150, fillratio=1.25, inp=2, "
+            + f"poretype=1, radiopt=0, istrng={salt:g}, fillratio=1.25, inp=2, "
             # Amber membrane PB needs the linear non-focusing periodic solver.
             + "sasopt=0, solvopt=2, ipb=1, bcopt=10, nfocus=1, linit=1000, "
             + "eneopt=1, cutfd=7.0, cutnb=99.0, maxarcdot=15000, npbverb=1,\n/\n"
@@ -432,7 +451,7 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
     }.get(entropy, "")
     nmode_namelist = (
         "&nmode\n nmstartframe=1, nmendframe=1000000, nminterval=1, nmode_igb=1, "
-        "nmode_istrng=0.0, dielc=1.0, drms=0.001, maxcyc=10000,\n/\n"
+        f"nmode_istrng={salt:g}, dielc=1.0, drms=0.001, maxcyc=10000,\n/\n"
         if entropy == "nmode" else ""
     )
     pb_radii = 3 if model == "gb" else 4
@@ -636,6 +655,7 @@ def analyze_run(output_dir, config, *, analysis_dir=None, preliminary_phase=None
             ligand=mmpbsa_ligand,
             temperature_k=float(config.get("temperature_k") or 300.0),
             entropy=mmpbsa_entropy,
+            salt_molar=ionic_strength_from_config(config),
         )
         mmpbsa_plots = _plot_mmpbsa(
             analysis_dir, mmpbsa_dir / "FINAL_RESULTS_MMPBSA.csv",

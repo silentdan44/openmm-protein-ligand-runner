@@ -8,6 +8,7 @@ from prot_lig_runner.analysis import (
     _wrap_selection_into_box,
     c2_entropy,
     interaction_entropy,
+    ionic_strength_from_config,
     read_gmx_entropy,
     summarize_mmpbsa,
 )
@@ -83,6 +84,17 @@ class InteractionEntropyTests(unittest.TestCase):
 
     def test_c2_is_zero_for_constant_electrostatics(self):
         self.assertAlmostEqual(c2_entropy([-9.0, -9.0, -9.0], 300.0), 0.0, places=9)
+
+
+class IonicStrengthTests(unittest.TestCase):
+    def test_follows_configuration(self):
+        self.assertAlmostEqual(ionic_strength_from_config({"ionic_strength_molar": 0.2}), 0.2)
+
+    def test_explicit_zero_stays_zero(self):
+        self.assertEqual(ionic_strength_from_config({"ionic_strength_molar": 0.0}), 0.0)
+
+    def test_absent_key_uses_historical_default(self):
+        self.assertAlmostEqual(ionic_strength_from_config({}), 0.15)
 
 
 class SummarizeMmpbsaTests(unittest.TestCase):
