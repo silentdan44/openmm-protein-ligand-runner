@@ -4,12 +4,9 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from prot_lig_runner.analysis import (
-    analyze_snapshot,
-    read_state_data,
-    run_mmpbsa,
-    write_index_file,
-)
+from prot_lig_runner.analysis import analyze_snapshot
+from prot_lig_runner.mmpbsa import run_mmpbsa
+from prot_lig_runner.trajectory import read_state_data, write_index_file
 
 
 class AnalysisTests(unittest.TestCase):
@@ -83,10 +80,10 @@ class AnalysisTests(unittest.TestCase):
                 formats=SimpleNamespace(XTCTrajectoryFile=MagicMock(return_value=writer_context)),
             )
             with patch("prot_lig_runner.analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
-                with patch("prot_lig_runner.analysis.subprocess.run") as run:
+                with patch("prot_lig_runner.mmpbsa.subprocess.run") as run:
                     run.return_value.returncode = 0
                     with patch.dict("sys.modules", {"mdtraj": md}):
-                        with patch("prot_lig_runner.analysis.resolve_ligand",
+                        with patch("prot_lig_runner.mmpbsa.resolve_ligand",
                                    return_value=selection):
                             result = run_mmpbsa(root, analysis, interval=2)
             self.assertEqual(result, analysis / "mmpbsa")
@@ -144,10 +141,10 @@ class AnalysisTests(unittest.TestCase):
                 formats=SimpleNamespace(XTCTrajectoryFile=MagicMock(return_value=writer_context)),
             )
             with patch("prot_lig_runner.analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
-                with patch("prot_lig_runner.analysis.subprocess.run") as run:
+                with patch("prot_lig_runner.mmpbsa.subprocess.run") as run:
                     run.return_value.returncode = 0
                     with patch.dict("sys.modules", {"mdtraj": md}):
-                        with patch("prot_lig_runner.analysis.resolve_ligand",
+                        with patch("prot_lig_runner.mmpbsa.resolve_ligand",
                                    return_value=selection):
                             result = run_mmpbsa(
                                 root, analysis, model="pb_mem", membrane_thickness_angstrom=30.0

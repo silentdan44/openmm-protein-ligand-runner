@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .dataset import RunDataset, SECTIONS
+from .pdf import build_pdf
 
 SECTION_TITLES = {
     "qc": "Simulation QC",
@@ -122,7 +123,8 @@ def _mmpbsa_table(summary: dict | None) -> str:
     )
 
 
-def build_report(dataset: RunDataset, *, only: tuple[str, ...] | None = None) -> Path:
+def build_report(dataset: RunDataset, *, only: tuple[str, ...] | None = None,
+                 warnings: list[str] | None = None) -> Path:
     """Write ``report.html`` next to the analysis data and return its path."""
     figures = collect_figures(dataset)
     status = dataset.status()
@@ -133,7 +135,7 @@ def build_report(dataset: RunDataset, *, only: tuple[str, ...] | None = None) ->
         available = status["availability"][section]
         body = ""
         if section == "ligands":
-            body += _ligand_table(dataset.metrics)
+            body += "<h3>Per-ligand summary</h3>" + _ligand_table(dataset.metrics)
         if section == "mmpbsa":
             body += _mmpbsa_table(dataset.mmpbsa)
         if figures[section]:
@@ -148,6 +150,8 @@ def build_report(dataset: RunDataset, *, only: tuple[str, ...] | None = None) ->
             f'<section id="{section}"><h2>{html.escape(SECTION_TITLES[section])}</h2>{body}</section>'
         )
 
+    notes = "".join(f"<li>{html.escape(note)}</li>" for note in (warnings or []))
+    notes_block = f'<section><h2>Notes</h2><ul>{notes}</ul></section>' if notes else ""
     nav = " · ".join(
         f'<a href="#{section}">{html.escape(SECTION_TITLES[section])}</a>' for section in sections
     )
@@ -181,9 +185,11 @@ section {{ margin-bottom: 40px; }}
 </head>
 <body>
 <h1>Run report</h1>
-<p class="meta">{html.escape(str(dataset.root))} · generated {generated}</p>
+<p class="meta">{html.escape(str(dataset.root))} · generated {generated} ·
+<a href="report.pdf">download PDF</a></p>
 {nav}
 {_status_block(status)}
+{notes_block}
 {''.join(parts)}
 </body>
 </html>
@@ -191,6 +197,8 @@ section {{ margin-bottom: 40px; }}
     path = dataset.analysis / "report.html"
     dataset.analysis.mkdir(parents=True, exist_ok=True)
     path.write_text(document)
+
+    build_pdf(dataset, {section: figures[section] for section in sections}, warnings=warnings)
 
     manifest = {
         "generated_utc": generated,

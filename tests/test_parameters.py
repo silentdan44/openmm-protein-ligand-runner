@@ -4,14 +4,14 @@ from pathlib import Path
 
 import numpy as np
 
-from prot_lig_runner.analysis import (
-    _wrap_selection_into_box,
+from prot_lig_runner.mmpbsa import (
     c2_entropy,
     interaction_entropy,
     ionic_strength_from_config,
     read_gmx_entropy,
     summarize_mmpbsa,
 )
+from prot_lig_runner.trajectory import _wrap_selection_into_box
 from prot_lig_runner.analysis_metrics import estimate_membrane_planes
 
 K_B = 0.00198720425864083

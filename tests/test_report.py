@@ -48,6 +48,9 @@ class ReportDatasetTests(unittest.TestCase):
             path = build_report(dataset)
             text = path.read_text()
             manifest = json.loads((root / "analysis" / "report_manifest.json").read_text())
+            pdf = root / "analysis" / "report.pdf"
+            self.assertTrue(pdf.is_file())
+            self.assertTrue(pdf.read_bytes().startswith(b"%PDF"))
         self.assertIn("Waiting for data", text)
         self.assertIn("Simulation QC", text)
         self.assertFalse(manifest["status"]["availability"]["ligands"])
