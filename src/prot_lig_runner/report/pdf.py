@@ -13,7 +13,6 @@ def _summary_rows(dataset: RunDataset):
     rows = []
     for label, stats in ligands.items():
         rows.append([
-            "",
             label,
             str(stats.get("residue", "")),
             f"{stats.get('ligand_rmsd_nm_mean', 0):.2f}",
@@ -111,38 +110,38 @@ def _draw_summary(figure, dataset: RunDataset, warnings: list[str], total_pages:
         figure.text(0.08, 0.83, "  ·  ".join(lines), fontsize=7.5, va="top", color="0.2")
 
     ligand_rows = _summary_rows(dataset)
-    ligand_images = {
-        index: dataset.analysis / f"ligand_structure_{row[1]}.png"
-        for index, row in enumerate(ligand_rows, start=1)
-    }
     table_height = 0.05 + 0.06 * len(ligand_rows)
     table_obj = _draw_table(figure, ligand_rows,
-                ["", "Ligand", "Residue", "RMSD (nm)", "Contacts", "H-bonds"],
+                ["Ligand", "Residue", "RMSD (nm)", "Contacts", "H-bonds"],
                 top=0.80, height=table_height,
-                col_widths=[0.26, 0.12, 0.18, 0.14, 0.14, 0.14])
+                col_widths=[0.18, 0.26, 0.18, 0.18, 0.18])
+    table_bottom = 0.80 - table_height
     figure.canvas.draw()
     table_bbox = (table_obj.get_window_extent(figure.canvas.get_renderer()).transformed(
         figure.transFigure.inverted()
     ) if table_obj is not None else None)
-    # Draw the structure thumbnails in the reserved first column; positions
-    # come from the table geometry so they line up with their rows.
+    # Structures sit below the table, at a size where the graph is readable.
     import matplotlib.image as mpimg
 
-    row_height = (table_bbox.height / (len(ligand_rows) + 1)) if table_bbox else 0
-    for index, row in (enumerate(ligand_rows, start=1) if table_bbox else []):
-        thumb = dataset.analysis / f"ligand_structure_{row[1]}_thumb.png"
-        image_path = thumb if thumb.is_file() else dataset.analysis / f"ligand_structure_{row[1]}.png"
-        if not image_path.is_file():
-            continue
-        try:
-            image = mpimg.imread(image_path)
-        except (OSError, ValueError, SyntaxError):
-            continue
-        y = table_bbox.y1 - (index + 0.93) * row_height
-        inset = figure.add_axes([table_bbox.x0 + 0.004, y, 0.21, row_height * 0.9])
-        inset.imshow(image)
-        inset.axis("off")
-    table_bottom = 0.80 - (0.05 + 0.115 * len(ligand_rows))
+    structure_paths = [(row[0], dataset.analysis / f"ligand_structure_{row[0]}.png")
+                       for row in ligand_rows]
+    structure_paths = [(label, path) for label, path in structure_paths if path.is_file()]
+    if structure_paths:
+        width = 0.15
+        height = width * 8.27 / 11.69
+        gap = 0.035
+        y = table_bottom - height - 0.06
+        figure.text(0.06, y + height + 0.015, "Ligand structures", fontsize=8, weight="bold")
+        for index, (label, image_path) in enumerate(structure_paths):
+            try:
+                image = mpimg.imread(image_path)
+            except (OSError, ValueError, SyntaxError):
+                continue
+            inset = figure.add_axes([0.06 + index * (width + gap), y, width, height])
+            inset.imshow(image)
+            inset.axis("off")
+        table_bottom = y - 0.02
+
     mmpbsa_rows, title = _mmpbsa_rows(dataset)
     table_top = table_bottom - 0.04
     if mmpbsa_rows:
@@ -189,7 +188,7 @@ def build_pdf(dataset: RunDataset, figures: dict[str, list[Path]], *,
                 import textwrap
 
                 title = f"{SECTION_TITLES.get(section, section)}: {figure_caption(image_path, dataset)}"
-                figure.text(0.06, 0.96, textwrap.fill(title, 92), fontsize=9,
+                figure.text(0.10, 0.93, textwrap.fill(title, 80), fontsize=9,
                             weight="bold", va="top")
                 # Keep the plot's aspect ratio inside the A4 page.
                 page_ratio = 0.86 * 8.27 / (0.84 * 11.69)

@@ -12,7 +12,8 @@ from .pdf import build_pdf
 
 # Superseded by mmpbsa_decomposition.png; keep old results readable but do not
 # show the duplicates.
-DEPRECATED_FIGURES = {"mmpbsa_entropy.png", "mmpbsa_energy_terms.png", "mmpbsa_energy_summary.png"}
+DEPRECATED_FIGURES = {"mmpbsa_entropy.png", "mmpbsa_energy_terms.png", "mmpbsa_energy_summary.png",
+                      "contact_occupancy.png", "hydrogen_bond_occupancy.png"}
 
 SECTION_PATTERNS = {
     "qc": ("simulation_qc*.png", "pressure*.png", "temperature*.png"),
@@ -77,13 +78,8 @@ def _ligand_table(dataset: RunDataset) -> str:
         return ""
     rows = []
     for label, stats in ligands.items():
-        thumb_path = dataset.analysis / f"ligand_structure_{label}_thumb.png"
-        image = thumb_path if thumb_path.is_file() else dataset.analysis / f"ligand_structure_{label}.png"
-        thumb = (f'<img class="thumb" src="{html.escape(image.name)}" alt="{label}">'
-                 if image.is_file() else "")
         rows.append(
             "<tr>"
-            f"<td>{thumb}</td>"
             f"<td>{html.escape(label)}</td>"
             f"<td>{html.escape(str(stats.get('residue', '')))}</td>"
             f"<td>{stats.get('ligand_rmsd_nm_mean', 0):.2f}</td>"
@@ -92,10 +88,26 @@ def _ligand_table(dataset: RunDataset) -> str:
             "</tr>"
         )
     return (
-        '<table class="ligands"><thead><tr><th>Structure</th><th>Ligand</th><th>Residue</th>'
+        '<table class="ligands"><thead><tr><th>Ligand</th><th>Residue</th>'
         "<th>RMSD (nm)</th><th>Contacts</th><th>H-bonds</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
+
+
+def _ligand_structures(dataset: RunDataset) -> str:
+    ligands = (dataset.metrics.get("trajectory_metrics") or {}).get("ligands") or {}
+    cards = []
+    for label, stats in ligands.items():
+        image = dataset.analysis / f"ligand_structure_{label}.png"
+        if not image.is_file():
+            continue
+        residue = stats.get("residue", "")
+        cards.append(
+            '<figure class="structure">'
+            f'<img src="{html.escape(image.name)}" alt="{html.escape(label)}">'
+            f"<figcaption>{html.escape(label)} ({html.escape(str(residue))})</figcaption></figure>"
+        )
+    return f'<div class="structure-strip">{"".join(cards)}</div>' if cards else ""
 
 
 def _mmpbsa_table(summary: dict | None) -> str:
@@ -147,7 +159,8 @@ def build_report(dataset: RunDataset, *, only: tuple[str, ...] | None = None,
         available = status["availability"][section]
         body = ""
         if section == "ligands":
-            body += "<h3>Per-ligand summary</h3>" + _ligand_table(dataset)
+            body += ("<h3>Per-ligand summary</h3>" + _ligand_table(dataset)
+                     + "<h3>Ligand structures</h3>" + _ligand_structures(dataset))
         if section == "mmpbsa":
             body += _mmpbsa_table(dataset.mmpbsa)
         if figures[section]:
@@ -193,7 +206,9 @@ figcaption {{ color: #555; font-size: 0.85em; }}
 table {{ border-collapse: collapse; margin: 12px 0 20px; }}
 table.ligands {{ width: auto; max-width: 720px; }}
 table.ligands td:first-child {{ width: 84px; }}
-img.thumb {{ height: 56px; display: block; }}
+div.structure-strip {{ display: flex; flex-wrap: wrap; gap: 18px; margin: 8px 0 20px; }}
+figure.structure {{ margin: 0; text-align: center; }}
+figure.structure img {{ height: 190px; border: 1px solid #eee; border-radius: 6px; }}
 th, td {{ border-bottom: 1px solid #ddd; padding: 6px 12px; text-align: left; font-size: 0.9em; }}
 section {{ margin-bottom: 40px; }}
 </style>

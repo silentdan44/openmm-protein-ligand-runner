@@ -25,6 +25,7 @@ FIGURE_TITLES = {
     "protein_rmsf": "Per-residue RMSF",
     "ligand_comparison": "Ligand RMSD, contacts and hydrogen bonds",
     "ligand_pocket": "Ligand pocket (all ligands combined)",
+    "ligand_interactions": "Protein-ligand contacts and hydrogen bonds by ligand",
     "contact_occupancy": "Protein-ligand contact occupancy",
     "hydrogen_bond_occupancy": "Hydrogen-bond occupancy",
     "membrane_integrity": "Membrane thickness, area per lipid and lipid counts",

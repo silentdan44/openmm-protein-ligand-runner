@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 
 PLOT_FILES = (
     "simulation_qc.png", "protein_stability.png", "protein_rmsf.png", "ligand_pocket.png",
-    "contact_occupancy.png", "hydrogen_bond_occupancy.png", "membrane_integrity.png",
+    "contact_occupancy.png", "hydrogen_bond_occupancy.png", "ligand_interactions.png",
+    "membrane_integrity.png",
     "residue_distances.png", "mmpbsa_energy_terms.png", "mmpbsa_energy_summary.png",
     "mmpbsa_entropy.png", "mmpbsa_decomposition.png",
     "mmpbsa_residue_decomposition.png",
@@ -268,75 +269,53 @@ def _plot_trajectory(output_dir, data):
             generated.append("ligand_comparison.png")
 
     contacts = data.get("contact_occupancy", [])
+    hbonds = data.get("hbond_occupancy", [])
     ligand_names = {ligand.get("residue") or ligand.get("residue_label"): ligand.get("label")
                     for ligand in data.get("ligands", [])}
-    if contacts:
-        def contact_plot(plt):
-            groups = {}
-            for row in contacts:
-                groups.setdefault(row.get("ligand_residue"), []).append(row)
-            if len(groups) > 1:
-                order = [ligand.get("residue") or ligand.get("residue_label")
-                         for ligand in data.get("ligands", [])]
-                ordered = sorted(groups, key=lambda key: order.index(key) if key in order else len(order))
-                fig, axes = plt.subplots(len(ordered), 1, figsize=(183 / 25.4, 45 / 25.4 * len(ordered)),
-                                         constrained_layout=True, squeeze=False)
-                for ax, residue in zip(axes[:, 0], ordered):
-                    rows = groups[residue]
-                    label = ligand_names.get(residue, residue or "ligand")
-                    top = sorted(rows, key=lambda row: row["occupancy"], reverse=True)[:15][::-1]
-                    ax.barh([row["protein_residue"] for row in top],
-                            [row["occupancy"] for row in top], color="#0f766e")
-                    ax.set_xlim(0, 1)
-                    _axis(ax, f"{label} ({residue}): protein contacts", "Residue", "Fraction of frames")
-                return fig
-            rows = contacts[:20][::-1]
-            label = next(iter(ligand_names.values()), "ligand")
-            fig, ax = plt.subplots(figsize=(183 / 25.4, max(50, len(rows) * 4.2) / 25.4), constrained_layout=True)
-            ax.barh([row["protein_residue"] for row in rows],
-                    [row["occupancy"] for row in rows], color="#0f766e",
-                    label=f"{label}: contacts")
-            ax.set_xlim(0, 1)
-            ax.legend()
-            _axis(ax, "", "Residue", "Fraction of frames")
-            return fig
-        if _save_optional_plot(output_dir, "contact_occupancy.png", contact_plot):
-            generated.append("contact_occupancy.png")
+    if contacts or hbonds:
+        def interactions_plot(plt):
+            from .report.style import PALETTE
 
-    hbonds = data.get("hbond_occupancy", [])
-    if hbonds:
-        def hbond_plot(plt):
-            groups = {}
-            for row in hbonds:
-                groups.setdefault(row.get("ligand_residue"), []).append(row)
-            if len(groups) > 1:
-                order = [ligand.get("residue") or ligand.get("residue_label")
-                         for ligand in data.get("ligands", [])]
-                ordered = sorted(groups, key=lambda key: order.index(key) if key in order else len(order))
-                fig, axes = plt.subplots(len(ordered), 1, figsize=(183 / 25.4, 42 / 25.4 * len(ordered)),
-                                         constrained_layout=True, squeeze=False)
-                for ax, residue in zip(axes[:, 0], ordered):
-                    rows = groups[residue]
-                    label = ligand_names.get(residue, residue or "ligand")
-                    top = sorted(rows, key=lambda row: row["occupancy"], reverse=True)[:12][::-1]
-                    ax.barh([f'{row["protein_residue"]} {row["protein_atom"]}–{row["ligand_atom"]}'
-                             for row in top],
-                            [row["occupancy"] for row in top], color="#7c3aed")
-                    ax.set_xlim(0, 1)
-                    _axis(ax, f"{label} ({residue}): hydrogen bonds", "Interaction", "Fraction of frames")
-                return fig
-            rows = hbonds[:20][::-1]
-            label = next(iter(ligand_names.values()), "ligand")
-            fig, ax = plt.subplots(figsize=(183 / 25.4, max(50, len(rows) * 4.5) / 25.4), constrained_layout=True)
-            ax.barh([f'{row["protein_residue"]} {row["protein_atom"]}–{row["ligand_atom"]}' for row in rows],
-                    [row["occupancy"] for row in rows], color="#7c3aed",
-                    label=f"{label}: hydrogen bonds")
-            ax.set_xlim(0, 1)
-            ax.legend()
-            _axis(ax, "", "Interaction", "Fraction of frames")
+            fig, axes = plt.subplots(1, 2, figsize=(183 / 25.4, 95 / 25.4),
+                                     constrained_layout=True)
+            for ax, letter, rows, colour_count, kind in (
+                (axes[0], "a", contacts, 10, "contacts"),
+                (axes[1], "b", hbonds, 8, "hydrogen bonds"),
+            ):
+                if not rows:
+                    ax.axis("off")
+                    continue
+                grouped = {}
+                for row in rows:
+                    grouped.setdefault(row.get("ligand_residue"), []).append(row)
+                labels, values, colours = [], [], []
+                for index, (residue, group) in enumerate(grouped.items()):
+                    top = sorted(group, key=lambda item: item["occupancy"], reverse=True)[:colour_count]
+                    for item in top:
+                        if kind == "contacts":
+                            label = item["protein_residue"]
+                        else:
+                            label = f'{item["protein_residue"]} {item["protein_atom"]}–{item["ligand_atom"]}'
+                        labels.append(f"{label} [{ligand_names.get(residue, residue)}]")
+                        values.append(item["occupancy"])
+                        colours.append(PALETTE[index % len(PALETTE)])
+                order = sorted(range(len(values)), key=lambda i: values[i])
+                labels = [labels[i] for i in order]
+                values = [values[i] for i in order]
+                colours = [colours[i] for i in order]
+                ax.barh(labels, values, color=colours)
+                ax.set_xlim(0, 1)
+                _axis(ax, "", "Interaction", "Fraction of frames")
+                ax.tick_params(axis="y", labelsize=6)
+                ax.text(-0.22, 1.02, letter, transform=ax.transAxes, fontsize=8,
+                        weight="bold", va="bottom", ha="left")
+                handles = [plt.Rectangle((0, 0), 1, 1, color=PALETTE[i % len(PALETTE)])
+                           for i in range(len(grouped))]
+                names = [ligand_names.get(residue, residue) for residue in grouped]
+                ax.legend(handles, names, loc="lower right")
             return fig
-        if _save_optional_plot(output_dir, "hydrogen_bond_occupancy.png", hbond_plot):
-            generated.append("hydrogen_bond_occupancy.png")
+        if _save_optional_plot(output_dir, "ligand_interactions.png", interactions_plot):
+            generated.append("ligand_interactions.png")
 
     membrane = data.get("membrane_metrics")
     if membrane:
