@@ -70,13 +70,14 @@ def moving_average(values, window):
     return np.where(counts > 0, smoothed, np.nan)
 
 
-def smooth_with_spread(ax, x, y, *, window, colour, label, band=True):
+def smooth_with_spread(ax, x, y, *, window, colour, label, band=True, raw=True):
     """Raw trace in the background, smoothed line on top, ±SD band around it."""
     import numpy as np
 
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
-    ax.plot(x, y, color=colour, linewidth=0.35, alpha=0.28, label="_nolegend_")
+    if raw:
+        ax.plot(x, y, color=colour, linewidth=0.35, alpha=0.28, label="_nolegend_")
     if window > 1 and y.size > window:
         smooth = moving_average(y, window)
         residual = y - smooth

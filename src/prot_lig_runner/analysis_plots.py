@@ -339,10 +339,10 @@ def _plot_trajectory(output_dir, data):
                                      constrained_layout=True, sharex=True)
             window = max(3, min(51, len(time) // 25 or 3))
             smooth_with_spread(axes[0], time, membrane["membrane_area_per_lipid_nm2"],
-                               window=window, colour=PALETTE[0], label="area per lipid")
+                               window=window, colour=PALETTE[0], label="area per lipid", raw=False)
             _axis(axes[0], "", "Area per lipid (nm$^2$)")
             smooth_with_spread(axes[1], time, membrane["membrane_thickness_nm"],
-                               window=window, colour=PALETTE[2], label="thickness")
+                               window=window, colour=PALETTE[2], label="thickness", raw=False)
             _axis(axes[1], "", "Thickness (nm)")
             axes[2].plot(time, membrane["membrane_lower_lipid_count"], color=PALETTE[1],
                          linewidth=0.9, label="lower leaflet")
