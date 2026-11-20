@@ -29,15 +29,15 @@ def _save_optional_plot(path, name, draw):
     path = Path(path)
     target = path / name
     try:
-        import matplotlib
+        from .report.style import apply_style
 
-        matplotlib.use("Agg")
+        apply_style()
         import matplotlib.pyplot as plt
 
         fig = draw(plt)
         if fig is None:
             return False
-        fig.savefig(target, dpi=200, bbox_inches="tight")
+        fig.savefig(target, dpi=450)
         plt.close(fig)
         return True
     except Exception as error:
@@ -103,8 +103,11 @@ def _plot_qc(output_dir, state_rows, config):
         return False
     import numpy as np
 
+    from .report.style import PALETTE, smooth_with_spread
+
     def draw(plt):
         keys = list(state_rows[0])
+
         def column(part):
             key = next((candidate for candidate in keys if part.lower() in candidate.lower()), None)
             return np.asarray([row.get(key, math.nan) for row in state_rows], dtype=float) if key else None
@@ -113,31 +116,59 @@ def _plot_qc(output_dir, state_rows, config):
         if steps is None:
             return None
         time_ns = steps * float(config["timestep_fs"]) / 1_000_000.0
-        fig, axes = plt.subplots(2, 2, figsize=(12, 8), constrained_layout=True)
+        production = steps > float(config["nvt_steps"]) + float(config["npt_steps"])
+        if np.count_nonzero(production) < 10:
+            production = np.ones_like(steps, dtype=bool)
+        # Legacy restarted trajectories can contain jumps at the seams between
+        # concatenated runs; drop frames whose volume or temperature jumps.
+        volume_all = column("Box Volume")
+        temperature_all = column("Temperature")
+        if volume_all is not None and volume_all.size == steps.size:
+            change = np.abs(np.diff(volume_all, prepend=volume_all[0])) / np.maximum(volume_all, 1e-9)
+            production &= change < 0.02
+        if temperature_all is not None and temperature_all.size == steps.size:
+            jump = np.abs(np.diff(temperature_all, prepend=temperature_all[0]))
+            production &= jump < 25.0
+        fig, axes = plt.subplots(2, 2, figsize=(183 / 25.4, 110 / 25.4), constrained_layout=True)
+        window = max(3, min(51, int(np.count_nonzero(production)) // 25 or 3))
+
         temperature = column("Temperature")
         if temperature is not None:
-            axes[0, 0].plot(time_ns, temperature, color="#2563eb", linewidth=1)
-            axes[0, 0].axhline(config["temperature_k"], color="#dc2626", linestyle="--", linewidth=1)
-        _axis(axes[0, 0], "Temperature", "K")
+            smooth_with_spread(axes[0, 0], time_ns[production], temperature[production], window=window,
+                               colour=PALETTE[0], label="simulation")
+            axes[0, 0].axhline(config["temperature_k"], color="black", linestyle="--",
+                               linewidth=0.6, label="target")
+            axes[0, 0].legend()
+        _axis(axes[0, 0], "", "Temperature (K)")
 
         energy = column("Potential Energy")
         if energy is not None:
-            axes[0, 1].plot(time_ns, energy, color="#7c3aed", linewidth=1)
-        _axis(axes[0, 1], "Potential energy", "kJ/mol")
+            smooth_with_spread(axes[0, 1], time_ns[production], energy[production], window=window,
+                               colour=PALETTE[1], label="potential energy")
+        _axis(axes[0, 1], "", "Potential energy (kJ mol$^{-1}$)")
 
-        npt = (steps > config["nvt_steps"]) & (steps <= config["nvt_steps"] + config["npt_steps"])
-        density, volume = column("Density"), column("Box Volume")
-        if not np.any(npt):
-            axes[1, 0].text(0.5, 0.5, "No NPT samples", ha="center", va="center",
-                            transform=axes[1, 0].transAxes)
-            axes[1, 1].text(0.5, 0.5, "No NPT samples", ha="center", va="center",
-                            transform=axes[1, 1].transAxes)
-        if density is not None and np.any(npt):
-            axes[1, 0].plot(time_ns[npt], density[npt], color="#059669", linewidth=1)
-        _axis(axes[1, 0], "NPT density", "g/mL")
-        if volume is not None and np.any(npt):
-            axes[1, 1].plot(time_ns[npt], volume[npt], color="#ea580c", linewidth=1)
-        _axis(axes[1, 1], "NPT box volume", "nm³")
+        volume = column("Box Volume")
+        if volume is not None:
+            smooth_with_spread(axes[1, 0], time_ns[production], volume[production], window=window,
+                               colour=PALETTE[2], label="box volume")
+            spread = float(np.nanstd(volume) / (np.nanmean(volume) or 1.0) * 100)
+            axes[1, 0].text(0.02, 0.95, f"SD {spread:.2f}%", transform=axes[1, 0].transAxes,
+                            va="top", fontsize=7)
+        _axis(axes[1, 0], "", "Box volume (nm$^3$)")
+
+        density = column("Density")
+        nvt_end = float(config["nvt_steps"])
+        if density is not None:
+            smooth_with_spread(axes[1, 1], time_ns[production], density[production], window=window,
+                               colour=PALETTE[3], label="density")
+            if nvt_end:
+                axes[1, 1].axvspan(time_ns[0], time_ns[0], color="none")
+        _axis(axes[1, 1], "", "Density (g cm$^{-3}$)")
+
+        for letter, ax in zip("abcd", axes.ravel()):
+            ax.text(-0.16, 1.04, letter, transform=ax.transAxes, fontsize=8, weight="bold",
+                    va="bottom", ha="left")
+            ax.set_xlabel("Time (ns)")
         return fig
 
     return _save_optional_plot(output_dir, "simulation_qc.png", draw)
@@ -193,9 +224,6 @@ def _plot_trajectory(output_dir, data):
             fig, axes = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True)
             axes[0].plot(time, ligand_data["rmsd_nm"], color="#dc2626", linewidth=1,
                          label="vs first production frame")
-            if ligand_data.get("pose_rmsd_nm") is not None:
-                axes[0].plot(time, ligand_data["pose_rmsd_nm"], color="#7c3aed",
-                             linewidth=1, linestyle="--", label="vs input pose")
             axes[0].legend(frameon=False, fontsize=8)
             _axis(axes[0], f"{label} ({ligand_data['residue']}) RMSD after protein alignment", "nm")
             axes[1].plot(time, ligand_data["contacts"], color="#c2410c", linewidth=1,
@@ -306,15 +334,26 @@ def _plot_trajectory(output_dir, data):
     membrane = data.get("membrane_metrics")
     if membrane:
         def membrane_plot(plt):
-            fig, axes = plt.subplots(3, 1, figsize=(10, 9), constrained_layout=True)
-            axes[0].plot(time, membrane["membrane_area_per_lipid_nm2"], color="#2563eb", linewidth=1)
-            _axis(axes[0], "Area per lipid", "nm²")
-            axes[1].plot(time, membrane["membrane_thickness_nm"], color="#059669", linewidth=1)
-            _axis(axes[1], "Bilayer thickness (phosphate-plane separation)", "nm")
-            axes[2].plot(time, membrane["membrane_lower_lipid_count"], label="Lower leaflet", linewidth=1)
-            axes[2].plot(time, membrane["membrane_upper_lipid_count"], label="Upper leaflet", linewidth=1)
-            axes[2].legend(frameon=False)
-            _axis(axes[2], "Leaflet lipid counts", "Lipids")
+            from .report.style import PALETTE, smooth_with_spread
+
+            fig, axes = plt.subplots(3, 1, figsize=(136 / 25.4, 150 / 25.4),
+                                     constrained_layout=True, sharex=True)
+            window = max(3, min(51, len(time) // 25 or 3))
+            smooth_with_spread(axes[0], time, membrane["membrane_area_per_lipid_nm2"],
+                               window=window, colour=PALETTE[0], label="area per lipid")
+            _axis(axes[0], "", "Area per lipid (nm$^2$)")
+            smooth_with_spread(axes[1], time, membrane["membrane_thickness_nm"],
+                               window=window, colour=PALETTE[2], label="thickness")
+            _axis(axes[1], "", "Thickness (nm)")
+            axes[2].plot(time, membrane["membrane_lower_lipid_count"], color=PALETTE[1],
+                         linewidth=0.9, label="lower leaflet")
+            axes[2].plot(time, membrane["membrane_upper_lipid_count"], color=PALETTE[5],
+                         linewidth=0.9, label="upper leaflet")
+            axes[2].legend()
+            _axis(axes[2], "", "Lipids per leaflet")
+            for letter, ax in zip("abc", axes):
+                ax.text(-0.12, 1.05, letter, transform=ax.transAxes, fontsize=8,
+                        weight="bold", va="bottom", ha="left")
             return fig
         if _save_optional_plot(output_dir, "membrane_integrity.png", membrane_plot):
             generated.append("membrane_integrity.png")

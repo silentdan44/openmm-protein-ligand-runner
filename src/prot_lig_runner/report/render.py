@@ -74,21 +74,18 @@ def _ligand_table(metrics: dict) -> str:
         return ""
     rows = []
     for label, stats in ligands.items():
-        pose = stats.get("ligand_pose_rmsd_nm_mean")
         rows.append(
             "<tr>"
             f"<td>{html.escape(label)}</td>"
             f"<td>{html.escape(str(stats.get('residue', '')))}</td>"
             f"<td>{stats.get('ligand_rmsd_nm_mean', 0):.2f}</td>"
-            f"<td>{'—' if pose is None else f'{pose:.2f}'}</td>"
             f"<td>{stats.get('ligand_contacts_mean', 0):.1f}</td>"
             f"<td>{stats.get('protein_ligand_hbonds_mean', 0):.1f}</td>"
             "</tr>"
         )
     return (
-        "<table><thead><tr><th>Ligand</th><th>Residue</th>"
-        "<th>RMSD vs start (nm)</th><th>RMSD vs input (nm)</th>"
-        "<th>Contacts</th><th>H-bonds</th></tr></thead>"
+        '<table class="ligands"><thead><tr><th>Ligand</th><th>Residue</th>'
+        "<th>RMSD (nm)</th><th>Contacts</th><th>H-bonds</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
 
@@ -186,6 +183,7 @@ figure {{ margin: 0 0 24px; }}
 figure img {{ max-width: 100%; border: 1px solid #eee; border-radius: 6px; }}
 figcaption {{ color: #555; font-size: 0.85em; }}
 table {{ border-collapse: collapse; margin: 12px 0 20px; }}
+table.ligands {{ width: auto; max-width: 620px; }}
 th, td {{ border-bottom: 1px solid #ddd; padding: 6px 12px; text-align: left; font-size: 0.9em; }}
 section {{ margin-bottom: 40px; }}
 </style>
