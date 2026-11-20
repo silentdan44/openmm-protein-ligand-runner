@@ -151,6 +151,10 @@ For `pb_mem`, the membrane thickness is estimated from the lipid phosphate plane
 
 This is an approximate end-state estimate, not an absolute binding free energy. Use it to rank ligands under one protocol, ideally across independent replicas; frame-to-frame variation is descriptive because adjacent frames are correlated. Per-residue decomposition is optional via `--mmpbsa-decomposition` and costs additional computation.
 
+### Memory on large multi-chain complexes
+
+The GROMACS→Amber conversion in gmx_MMPBSA can produce a very large Amber topology for multi-chain GROMACS topologies: a 27 340-atom pentamer exported from `system_final.pdb` became an 18 GB `analysis/mmpbsa/COM.prmtop`, after which sander was OOM-killed at ~112 GB RSS on a 123 GB host. The same code path completes on a small single-chain test system, so this is a scaling limit of the conversion, not of the analysis code. Check the size of `analysis/mmpbsa/COM.prmtop` before a long run; until the conversion is fixed, run MMPBSA on a truncated receptor (one subunit or the binding-site region) or on a host with substantially more memory.
+
 To rebuild analysis from a completed run, or run MMPBSA when its topology files are present:
 
 ```bash
