@@ -128,6 +128,8 @@ class SummarizeMmpbsaTests(unittest.TestCase):
             )
             (Path(directory) / "_GMXMMPBSA_normal_gb_c2_entropy.dat").write_text(
                 "C2 Entropy (-TΔS): 3.1000\n"
+                "C2 Block SD: 1.2000\n"
+                "C2 Block SEM: 0.3913\n"
             )
             summary = summarize_mmpbsa(
                 path, temperature_k=300.0, entropy="both",

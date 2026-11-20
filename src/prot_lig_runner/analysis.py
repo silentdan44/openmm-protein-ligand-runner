@@ -114,7 +114,7 @@ def read_gmx_entropy(directory, model="gb"):
         value = re.search(regex, text)
         if value is None:
             continue
-        sem = re.search(r"Block diagnostic:.*?SEM\s+(-?[\d.]+)", text)
+        sem = re.search(r"(?:Block diagnostic:.*?SEM\s+|C2 Block SEM:\s*)(-?[\d.]+)", text)
         results[method] = {
             "minus_tds_kcal_mol": float(value.group(1)),
             "sem_minus_tds_kcal_mol": float(sem.group(1)) if sem else None,
