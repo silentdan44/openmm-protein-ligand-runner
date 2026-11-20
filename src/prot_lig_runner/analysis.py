@@ -291,12 +291,16 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
         '&decomp\n idecomp=2, dec_verbose=1, print_res="within 4",\n/\n'
         if decomposition else ""
     )
+    # igb=5 conventionally pairs with mbondi2 radii (PBRadii=3); gmx_MMPBSA
+    # otherwise reuses mbondi3 (4), which is calibrated for igb=8. PB runs take
+    # radii from the topology (radiopt=0), where mbondi3 is the usual choice.
+    pb_radii = 3 if model == "gb" else 4
     input_path.write_text(
         "Single-trajectory protein-ligand binding free-energy estimate.\n"
         + (f"Trajectory window: final {float(last_ns):g} ns of production; "
            "frames outside this window were excluded before applying interval.\n"
            if last_ns is not None else "Trajectory window: all available production frames.\n")
-        + f"&general\n startframe=1, interval={interval}, verbose=1,\n/\n"
+        + f"&general\n startframe=1, interval={interval}, PBRadii={pb_radii}, verbose=1,\n/\n"
         + model_namelist + decomposition_namelist
     )
 
