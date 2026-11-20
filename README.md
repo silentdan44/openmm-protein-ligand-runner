@@ -95,6 +95,8 @@ Reports are assembled by `report/` from a dataset view of the run directory, so 
 - `python -m prot_lig_runner.report --run DIR` reads `run_state.json`, `metrics.json`, `time_series.csv` and MMPBSA output without loading the trajectory; it writes `analysis/report.html`, `analysis/report.pdf` and `analysis/report_manifest.json`.
 - `--only qc,ligands` limits the sections, `--print-status` prints phase, simulated/planned ns, frame count and per-section availability.
 - Each report has a summary page plus one A4 page per figure in the PDF, for reading on a phone.
+- Ligand figures name the ligand and its residue, and each ligand gets a 2D structure drawn with RDKit (PNG at 600 dpi plus SVG) from the SDF copies stored in `results/inputs/`.
+- MMPBSA is one figure: per-frame EEL/VDW/EGB/ESURF with ΔH and ΔG, plus a bar summary of the contributions, −TΔS and ΔG.
 
 `analysis` writes the same report at the end of a run, so `report` is only needed to re-render or to inspect a running simulation.
 

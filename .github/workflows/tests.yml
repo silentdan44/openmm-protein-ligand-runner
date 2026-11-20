@@ -17,6 +17,7 @@ jobs:
           create-args: >-
             python=3.11
             openmm=8.6.1
+            rdkit>=2024.3
             pdbfixer=1.11
             openff-toolkit=0.16.5
             openff-interchange=0.4.1

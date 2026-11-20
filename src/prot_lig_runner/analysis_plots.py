@@ -14,6 +14,7 @@ PLOT_FILES = (
     "simulation_qc.png", "protein_stability.png", "protein_rmsf.png", "ligand_pocket.png",
     "contact_occupancy.png", "hydrogen_bond_occupancy.png", "membrane_integrity.png",
     "residue_distances.png", "mmpbsa_energy_terms.png", "mmpbsa_energy_summary.png",
+    "mmpbsa_entropy.png", "mmpbsa_decomposition.png",
     "mmpbsa_residue_decomposition.png",
     # Remove these pre-report plots when regenerating an analysis directory.
     "diagnostics.png", "temperature.png", "potential_energy.png", "kinetic_energy.png",
@@ -518,3 +519,72 @@ def _plot_mmpbsa_entropy(output_dir, summary):
         return fig
 
     return _save_optional_plot(output_dir, "mmpbsa_entropy.png", draw)
+
+
+def _plot_mmpbsa_decomposition(output_dir, summary, mmpbsa_csv,
+                               filename="mmpbsa_decomposition.png"):
+    """One figure: per-frame Gibbs decomposition and the final ΔG."""
+    try:
+        rows = read_mmpbsa_delta_csv(mmpbsa_csv)
+    except Exception as error:
+        logger.warning("Skipping MMPBSA decomposition plot: %s", error)
+        return []
+    if not rows:
+        return []
+    import numpy as np
+
+    frame_key = next(key for key in rows[0] if key.lower().startswith("frame"))
+    frames = np.arange(1, len(rows) + 1)
+    terms = {}
+    for key in ("VDWAALS", "EEL", "EGB", "EPB", "ESURF"):
+        if key in rows[0]:
+            terms[key] = np.asarray([row[key] for row in rows], dtype=float)
+    total = np.asarray([row["TOTAL"] for row in rows], dtype=float) if "TOTAL" in rows[0] else None
+
+    def draw(plt):
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True,
+                                 gridspec_kw={"width_ratios": [1.6, 1]})
+        colours = {"EEL": "#2563eb", "VDWAALS": "#0f766e", "EGB": "#b45309",
+                   "EPB": "#b45309", "ESURF": "#7c3aed"}
+        for name, values in terms.items():
+            axes[0].plot(frames, values, linewidth=1, color=colours[name], label=name)
+        if total is not None:
+            axes[0].plot(frames, total, color="black", linewidth=1.6, label="ΔH (total)")
+        if summary:
+            variants = summary.get("entropy_variants") or {}
+            primary = next(iter(variants.values()), None)
+            if primary:
+                axes[0].axhline(primary["delta_g_kcal_mol"], color="#dc2626",
+                                linestyle="--", linewidth=1.2, label="ΔG (with entropy)")
+        axes[0].legend(frameon=False, fontsize=8, ncol=2)
+        _axis(axes[0], "", "kcal/mol", "MMPBSA frame")
+        axes[0].text(-0.12, 1.02, "a", transform=axes[0].transAxes, fontsize=14, va="bottom")
+
+        labels, values = [], []
+        for name in ("EEL", "VDWAALS", "EGB", "EPB", "ESURF"):
+            if name in terms:
+                labels.append(name)
+                values.append(float(terms[name].mean()))
+        if summary and summary.get("delta_h_mean_kcal_mol") is not None:
+            labels.append("ΔH")
+            values.append(float(summary["delta_h_mean_kcal_mol"]))
+            variants = summary.get("entropy_variants") or {}
+            primary = next(iter(variants.values()), None)
+            if primary:
+                labels += ["−TΔS", "ΔG"]
+                values += [float(primary["minus_tds_kcal_mol"]),
+                           float(primary["delta_g_kcal_mol"])]
+        positions = np.arange(len(labels))
+        bar_colours = ["#2563eb" if value < 0 else "#dc2626" for value in values]
+        axes[1].barh(positions, values, color=bar_colours, height=0.62)
+        axes[1].set_yticks(positions, labels)
+        axes[1].axvline(0.0, color="0.3", linewidth=0.8)
+        axes[1].invert_yaxis()
+        _axis(axes[1], "", "kcal/mol", "")
+        axes[1].set_xlabel("kcal/mol")
+        axes[1].set_ylabel("")
+        axes[1].text(-0.28, 1.02, "b", transform=axes[1].transAxes, fontsize=14, va="bottom")
+        return fig
+
+    saved = _save_optional_plot(output_dir, filename, draw)
+    return [filename] if saved else []

@@ -64,7 +64,11 @@ def _summary_page_text(dataset: RunDataset, warnings: list[str]) -> list[str]:
 
     summary = dataset.mmpbsa
     if summary:
-        lines += ["", "MMPBSA free-energy estimate (kcal/mol)"]
+        ligand = summary.get("ligand")
+        title = "MMPBSA free-energy estimate (kcal/mol)"
+        if ligand:
+            title += f" — {ligand}"
+        lines += ["", title]
         variants = summary.get("entropy_variants") or {}
         if variants:
             lines.append("Entropy   dH       -TdS     dG       SEM dG")

@@ -10,7 +10,11 @@ import subprocess
 from pathlib import Path
 
 from .analysis_metrics import estimate_membrane_planes, resolve_ligand
-from .analysis_plots import _plot_mmpbsa_entropy, plot_membrane_planes, read_mmpbsa_delta_csv
+from .analysis_plots import (
+    _plot_mmpbsa_decomposition,
+    plot_membrane_planes,
+    read_mmpbsa_delta_csv,
+)
 from .trajectory import _copy_mmpbsa_window, _wrap_selection_into_box, write_index_file
 
 logger = logging.getLogger(__name__)
@@ -448,10 +452,14 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
     except Exception as error:
         logger.warning("MMPBSA finished but entropy summarisation failed: %s", error)
     else:
+        summary["ligand"] = selection.get("label")
+        summary["ligand_residue"] = selection.get("residue_label")
         (mmpbsa_dir / "entropy.json").write_text(
             json.dumps(summary, indent=2, sort_keys=True) + "\n"
         )
-        _plot_mmpbsa_entropy(analysis_dir, summary)
+        _plot_mmpbsa_decomposition(
+            analysis_dir, summary, mmpbsa_dir / "FINAL_RESULTS_MMPBSA.csv"
+        )
         logger.info(
             "MMPBSA: dH = %.2f, -TdS = %.2f, dG = %.2f kcal/mol over %d frames (%s)",
             summary["delta_h_mean_kcal_mol"], summary["minus_tds_kcal_mol_value"],

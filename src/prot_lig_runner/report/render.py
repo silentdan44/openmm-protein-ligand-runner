@@ -10,6 +10,10 @@ from pathlib import Path
 from .dataset import RunDataset, SECTIONS, SECTION_TITLES, figure_title
 from .pdf import build_pdf
 
+# Superseded by mmpbsa_decomposition.png; keep old results readable but do not
+# show the duplicates.
+DEPRECATED_FIGURES = {"mmpbsa_entropy.png", "mmpbsa_energy_terms.png", "mmpbsa_energy_summary.png"}
+
 SECTION_PATTERNS = {
     "qc": ("simulation_qc*.png", "pressure*.png", "temperature*.png"),
     "stability": ("protein_*.png", "rmsf*.png", "distance*.png"),
@@ -19,6 +23,20 @@ SECTION_PATTERNS = {
 }
 
 
+def figure_caption(path: Path, dataset: RunDataset) -> str:
+    """Human caption, naming the ligand whenever the figure is ligand-specific."""
+    stem = path.stem
+    ligands = (dataset.metrics.get("trajectory_metrics") or {}).get("ligands") or {}
+    for label, stats in ligands.items():
+        residue = stats.get("residue", "")
+        if stem.endswith(f"_{label}"):
+            if stem.startswith("ligand_structure"):
+                return f"{label} ({residue}): 2D structure"
+            if stem.startswith("ligand_pocket"):
+                return f"{label} ({residue}): RMSD, contacts and hydrogen bonds"
+    return figure_title(path)
+
+
 def collect_figures(dataset: RunDataset) -> dict[str, list[Path]]:
     """Group existing plot files by section, newest names last."""
     figures: dict[str, list[Path]] = {}
@@ -26,8 +44,9 @@ def collect_figures(dataset: RunDataset) -> dict[str, list[Path]]:
         seen: list[Path] = []
         for pattern in SECTION_PATTERNS[section]:
             for path in sorted(dataset.analysis.glob(pattern)):
-                if path not in seen:
-                    seen.append(path)
+                if path.name in DEPRECATED_FIGURES or path in seen:
+                    continue
+                seen.append(path)
         # The combined ligand figure is superseded by the per-ligand ones.
         per_ligand = [path for path in seen if path.stem.startswith("ligand_pocket_LIG")]
         if per_ligand:
@@ -137,7 +156,7 @@ def build_report(dataset: RunDataset, *, only: tuple[str, ...] | None = None,
         if figures[section]:
             body += "".join(
                 f'<figure><img src="{html.escape(path.name)}" alt="{html.escape(path.name)}">'
-                f"<figcaption>{html.escape(figure_title(path))}</figcaption></figure>"
+                f"<figcaption>{html.escape(figure_caption(path, dataset))}</figcaption></figure>"
                 for path in figures[section]
             )
         elif not available:

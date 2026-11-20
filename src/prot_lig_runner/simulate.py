@@ -1138,6 +1138,13 @@ def main():
     if not math.isfinite(args.ionic_strength_molar) or args.ionic_strength_molar < 0:
         raise SystemExit("--ionic-strength-molar must be a finite number that is zero or greater")
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Keep copies of the inputs next to the results so reports and later
+    # analyses can redraw the ligand structures without the original paths.
+    inputs_dir = output_dir / "inputs"
+    inputs_dir.mkdir(exist_ok=True)
+    shutil.copyfile(receptor_path, inputs_dir / "receptor.pdb")
+    for index, ligand_path in enumerate(ligand_paths, start=1):
+        shutil.copyfile(ligand_path, inputs_dir / f"ligand_{index}.sdf")
     resume = args.resume
     progress_path = output_dir / PROGRESS_FILE
     config = run_configuration(args, receptor_path, ligand_paths)

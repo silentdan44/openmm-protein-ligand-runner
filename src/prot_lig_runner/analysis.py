@@ -13,7 +13,7 @@ from pathlib import Path
 from .analysis_metrics import trajectory_metrics
 from .analysis_plots import (
     PLOT_FILES,
-    _plot_mmpbsa,
+    _plot_mmpbsa_decomposition,
     _plot_qc,
     _plot_trajectory,
 )
@@ -35,8 +35,10 @@ def analyze_run(output_dir, config, *, analysis_dir=None, preliminary_phase=None
     analysis_dir.mkdir(parents=True, exist_ok=True)
     for name in PLOT_FILES:
         (analysis_dir / name).unlink(missing_ok=True)
-    for path in analysis_dir.glob("ligand_pocket_LIG*.png"):
-        path.unlink(missing_ok=True)
+    for pattern in ("ligand_pocket_LIG*.png", "ligand_structure_LIG*.png",
+                    "ligand_structure_LIG*.svg"):
+        for path in analysis_dir.glob(pattern):
+            path.unlink(missing_ok=True)
     for name in ("protein_ligand_contacts.csv", "protein_ligand_hbonds.csv", "residue_distances.csv"):
         (analysis_dir / name).unlink(missing_ok=True)
 
@@ -102,29 +104,44 @@ def analyze_run(output_dir, config, *, analysis_dir=None, preliminary_phase=None
             entropy=mmpbsa_entropy,
             salt_molar=ionic_strength_from_config(config),
         )
-        mmpbsa_plots = _plot_mmpbsa(
-            analysis_dir, mmpbsa_dir / "FINAL_RESULTS_MMPBSA.csv",
-            mmpbsa_dir / "FINAL_DECOMP_MMPBSA.csv" if mmpbsa_decomposition else None,
-        )
-        generated.extend(mmpbsa_plots)
         entropy_path = mmpbsa_dir / "entropy.json"
         if entropy_path.is_file():
             summary = json.loads(entropy_path.read_text())
             metrics["mmpbsa"] = {
                 key: value for key, value in summary.items() if not isinstance(value, list)
             }
-            for name in ("mmpbsa_entropy.png", "mmpbsa_membrane_planes.png"):
-                if (analysis_dir / name).is_file() and name not in generated:
-                    generated.append(name)
-        if not mmpbsa_plots:
+            generated.extend(_plot_mmpbsa_decomposition(
+                analysis_dir, summary, mmpbsa_dir / "FINAL_RESULTS_MMPBSA.csv",
+            ))
+        for name in ("mmpbsa_decomposition.png", "mmpbsa_membrane_planes.png"):
+            if (analysis_dir / name).is_file() and name not in generated:
+                generated.append(name)
+        if not any(name.startswith("mmpbsa_") for name in generated):
             warnings.append("MMPBSA completed, but its CSV contained no supported frame table for plotting.")
     elif (analysis_dir / "mmpbsa" / "FINAL_RESULTS_MMPBSA.csv").is_file():
-        generated.extend(_plot_mmpbsa(
-            analysis_dir, analysis_dir / "mmpbsa" / "FINAL_RESULTS_MMPBSA.csv",
-            analysis_dir / "mmpbsa" / "FINAL_DECOMP_MMPBSA.csv",
+        summary_path = analysis_dir / "mmpbsa" / "entropy.json"
+        summary = json.loads(summary_path.read_text()) if summary_path.is_file() else {}
+        if summary:
+            metrics["mmpbsa"] = {
+                key: value for key, value in summary.items() if not isinstance(value, list)
+            }
+        generated.extend(_plot_mmpbsa_decomposition(
+            analysis_dir, summary, analysis_dir / "mmpbsa" / "FINAL_RESULTS_MMPBSA.csv",
         ))
     else:
         warnings.append("MMPBSA plots skipped: this run has no MMPBSA results.")
+
+    ligands = (metrics.get("trajectory_metrics") or {}).get("ligands") or {}
+    if ligands:
+        from .report.structures import draw_ligand
+
+        for index, (label, stats) in enumerate(ligands.items(), start=1):
+            sdf_path = output_dir / "inputs" / f"ligand_{index}.sdf"
+            png = analysis_dir / f"ligand_structure_{label}.png"
+            svg = analysis_dir / f"ligand_structure_{label}.svg"
+            caption = f"{label} ({stats.get('residue', '')})"
+            if draw_ligand(sdf_path, png, svg, label=caption):
+                generated.append(png.name)
 
     (analysis_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
     build_report(RunDataset(output_dir, analysis_dir=analysis_dir), warnings=warnings)
