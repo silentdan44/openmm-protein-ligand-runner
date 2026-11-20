@@ -116,6 +116,29 @@ class SummarizeMmpbsaTests(unittest.TestCase):
         self.assertEqual(summary["minus_tds_kcal_mol_value"], 0.0)
         self.assertEqual(summary["entropy_variants"], {})
 
+    def test_reads_gmx_mmpbsa_entropy_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "FINAL_RESULTS_MMPBSA.csv"
+            path.write_text(self.CSV)
+            (Path(directory) / "_GMXMMPBSA_normal_gb_IE.dat").write_text(
+                "| Interaction Entropy results for gb calculations\n"
+                "IE-frames: last 3\n"
+                "Full-ensemble Interaction Entropy (-TΔS):    2.5000\n"
+                "Block diagnostic: size 4 blocks 5 SD 0.1000 SEM 0.0500\n"
+            )
+            (Path(directory) / "_GMXMMPBSA_normal_gb_c2_entropy.dat").write_text(
+                "C2 Entropy (-TΔS): 3.1000\n"
+            )
+            summary = summarize_mmpbsa(
+                path, temperature_k=300.0, entropy="both",
+                mmpbsa_dir=directory, model="gb",
+            )
+        self.assertAlmostEqual(summary["entropy_variants"]["ie"]["minus_tds_kcal_mol"], 2.5, places=6)
+        self.assertAlmostEqual(summary["entropy_variants"]["ie"]["sem_minus_tds_kcal_mol"], 0.05, places=6)
+        self.assertAlmostEqual(summary["entropy_variants"]["c2"]["minus_tds_kcal_mol"], 3.1, places=6)
+        self.assertEqual(summary["entropy_variants"]["ie"]["source"], "_GMXMMPBSA_normal_gb_IE.dat")
+        self.assertAlmostEqual(summary["delta_g_kcal_mol"], -13.0 + 2.5, places=6)
+
     def test_both_reports_ie_and_c2_but_uses_ie_for_delta_g(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "FINAL_RESULTS_MMPBSA.csv"

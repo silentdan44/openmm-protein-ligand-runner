@@ -88,7 +88,42 @@ def c2_entropy(electrostatics_kcal, temperature_k):
     return float(np.var(values, ddof=1) / (2.0 * R_KCAL_PER_MOL_K * temperature)) if values.size > 1 else 0.0
 
 
-def summarize_mmpbsa(path, *, temperature_k=300.0, entropy="ie"):
+def read_gmx_entropy(directory, model="gb"):
+    """Read entropy estimates that gmx_MMPBSA wrote for this calculation.
+
+    gmx_MMPBSA stores them next to the results as ``*normal_<model>_IE.dat``
+    and ``*normal_<model>_c2_entropy.dat``. Returns a mapping method ->
+    {minus_tds_kcal_mol, sem_minus_tds_kcal_mol, source}.
+    """
+    import re
+    from pathlib import Path
+
+    directory = Path(directory)
+    specs = {
+        "ie": ("*normal_{}_IE.dat".format(model),
+               r"Full-ensemble Interaction Entropy \(-TΔS\):\s*(-?[\d.]+)"),
+        "c2": ("*normal_{}_c2_entropy.dat".format(model),
+               r"C2 Entropy \(-TΔS\):\s*(-?[\d.]+)"),
+    }
+    results = {}
+    for method, (pattern, regex) in specs.items():
+        matches = sorted(directory.glob(pattern))
+        if not matches:
+            continue
+        text = matches[0].read_text(errors="replace")
+        value = re.search(regex, text)
+        if value is None:
+            continue
+        sem = re.search(r"Block diagnostic:.*?SEM\s+(-?[\d.]+)", text)
+        results[method] = {
+            "minus_tds_kcal_mol": float(value.group(1)),
+            "sem_minus_tds_kcal_mol": float(sem.group(1)) if sem else None,
+            "source": matches[0].name,
+        }
+    return results
+
+
+def summarize_mmpbsa(path, *, temperature_k=300.0, entropy="ie", mmpbsa_dir=None, model="gb"):
     """Summarise per-frame MMPBSA terms, add entropy estimates and errors.
 
     ``entropy`` selects the entropy model: ``ie`` (interaction entropy),
@@ -133,20 +168,29 @@ def summarize_mmpbsa(path, *, temperature_k=300.0, entropy="ie"):
     sem_h = sem(enthalpy)
     running_enthalpy = np.cumsum(enthalpy) / np.arange(1, len(enthalpy) + 1)
     variants = {}
+    gmx_estimates = read_gmx_entropy(mmpbsa_dir, model) if mmpbsa_dir is not None else {}
     for method in methods:
         estimator = estimators[method]
         running = np.asarray([estimator(eel[: index + 1], temperature_k) for index in range(len(eel))])
-        sem_tds = block_sem(eel, estimator)
-        delta_g = delta_h + float(running[-1])
+        if method in gmx_estimates:
+            minus_tds = gmx_estimates[method]["minus_tds_kcal_mol"]
+            sem_tds = gmx_estimates[method]["sem_minus_tds_kcal_mol"]
+            source = gmx_estimates[method]["source"]
+        else:
+            minus_tds = float(running[-1])
+            sem_tds = block_sem(eel, estimator)
+            source = "python"
+        delta_g = delta_h + minus_tds
         sem_g = float(np.sqrt(sem_h ** 2 + sem_tds ** 2)) if sem_tds is not None else sem_h
         variants[method] = {
             "name": method,
-            "minus_tds_kcal_mol": float(running[-1]),
+            "minus_tds_kcal_mol": float(minus_tds),
             "minus_tds_running_kcal_mol": running.tolist(),
             "delta_g_kcal_mol": float(delta_g),
             "delta_g_running_kcal_mol": (running_enthalpy + running).tolist(),
             "sem_minus_tds_kcal_mol": sem_tds,
             "sem_delta_g_kcal_mol": sem_g,
+            "source": source,
         }
 
     primary = methods[0] if methods else None
@@ -355,13 +399,21 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
     # igb=5 conventionally pairs with mbondi2 radii (PBRadii=3); gmx_MMPBSA
     # otherwise reuses mbondi3 (4), which is calibrated for igb=8. PB runs take
     # radii from the topology (radiopt=0), where mbondi3 is the usual choice.
+    # Let gmx_MMPBSA itself compute the entropy estimates; they are parsed
+    # from its *_IE.dat / *_c2_entropy.dat output below.
+    entropy_flags = {
+        "ie": "interaction_entropy=1,",
+        "c2": "c2_entropy=1,",
+        "both": "interaction_entropy=1, c2_entropy=1,",
+    }.get(entropy, "")
     pb_radii = 3 if model == "gb" else 4
     input_path.write_text(
         "Single-trajectory protein-ligand binding free-energy estimate.\n"
         + (f"Trajectory window: final {float(last_ns):g} ns of production; "
            "frames outside this window were excluded before applying interval.\n"
            if last_ns is not None else "Trajectory window: all available production frames.\n")
-        + f"&general\n startframe=1, interval={interval}, PBRadii={pb_radii}, verbose=1,\n/\n"
+        + f"&general\n startframe=1, interval={interval}, PBRadii={pb_radii}, verbose=1, "
+        + (entropy_flags + "\n/\n" if entropy_flags else "\n/\n")
         + model_namelist + decomposition_namelist
     )
 
@@ -462,6 +514,8 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
             mmpbsa_dir / "FINAL_RESULTS_MMPBSA.csv",
             temperature_k=temperature_k,
             entropy=entropy,
+            mmpbsa_dir=mmpbsa_dir,
+            model=model,
         )
     except Exception as error:
         logger.warning("MMPBSA finished but entropy summarisation failed: %s", error)
