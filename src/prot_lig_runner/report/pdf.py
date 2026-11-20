@@ -128,8 +128,8 @@ def _draw_summary(figure, dataset: RunDataset, warnings: list[str], total_pages:
     # come from the table geometry so they line up with their rows.
     import matplotlib.image as mpimg
 
-    row_height = table_bbox.height / (len(ligand_rows) + 1)
-    for index, row in enumerate(ligand_rows, start=1):
+    row_height = (table_bbox.height / (len(ligand_rows) + 1)) if table_bbox else 0
+    for index, row in (enumerate(ligand_rows, start=1) if table_bbox else []):
         thumb = dataset.analysis / f"ligand_structure_{row[1]}_thumb.png"
         image_path = thumb if thumb.is_file() else dataset.analysis / f"ligand_structure_{row[1]}.png"
         if not image_path.is_file():
