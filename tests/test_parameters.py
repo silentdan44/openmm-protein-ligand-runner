@@ -8,6 +8,7 @@ from prot_lig_runner.analysis import (
     _wrap_selection_into_box,
     c2_entropy,
     interaction_entropy,
+    read_gmx_entropy,
     summarize_mmpbsa,
 )
 from prot_lig_runner.analysis_metrics import estimate_membrane_planes
@@ -140,6 +141,23 @@ class SummarizeMmpbsaTests(unittest.TestCase):
         self.assertAlmostEqual(summary["entropy_variants"]["c2"]["minus_tds_kcal_mol"], 3.1, places=6)
         self.assertEqual(summary["entropy_variants"]["ie"]["source"], "_GMXMMPBSA_normal_gb_IE.dat")
         self.assertAlmostEqual(summary["delta_g_kcal_mol"], -13.0 + 2.5, places=6)
+
+    def test_reads_nmode_entropy_from_dat(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dat = Path(directory) / "FINAL_RESULTS_MMPBSA.dat"
+            dat.write_text(
+                "Normal [ -TΔS ]\n"
+                "ENTROPY RESULTS (NMODE APPROXIMATION):\n"
+                "Delta (Complex - Receptor - Ligand):\n"
+                "Entropy Term           Average     SD(Prop.)         SD   SEM(Prop.)        SEM\n"
+                "ΔTRANSLATIONAL           12.19          0.00       0.00         0.00       0.00\n"
+                "ΔVIBRATIONAL            -22.56          4.87       4.90         2.81       2.83\n"
+                "ΔTOTAL                   -2.60          4.87       4.89         2.81       2.83\n"
+            )
+            estimates = read_gmx_entropy(directory, "gb")
+        self.assertAlmostEqual(estimates["nmode"]["minus_tds_kcal_mol"], -2.6, places=6)
+        self.assertAlmostEqual(estimates["nmode"]["sem_minus_tds_kcal_mol"], 2.83, places=6)
+        self.assertEqual(estimates["nmode"]["source"], "FINAL_RESULTS_MMPBSA.dat")
 
     def test_both_reports_ie_and_c2_but_uses_ie_for_delta_g(self):
         with tempfile.TemporaryDirectory() as directory:

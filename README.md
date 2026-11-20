@@ -150,6 +150,7 @@ MMPBSA treats water and lipids implicitly while using the full membrane MD traje
 - `ie` (default): interaction entropy, −TΔS = kT ln⟨exp(ΔE/kT)⟩ − ⟨ΔE⟩, using only the fluctuation of the protein–ligand interaction energy.
 - `c2`: variance approximation, −TΔS = σ²(ΔE)/(2RT); cheaper and less sensitive to rare high-energy frames but ignores the shape of the distribution.
 - `both`: report both estimates; ΔG is taken from IE. They are alternatives, not additive.
+- `nmode`: normal-mode (harmonic) entropy from gmx_MMPBSA's `&nmode` block: ΔH plus Δ(−TΔS) of the complex−receptor−ligand difference, with its SEM. This minimises and diagonalises every frame, so it is only practical for small systems (thousands of atoms, a few frames); on a 27k-atom complex it will not finish in reasonable time.
 - `none`: enthalpy only.
 
 The values are computed by gmx_MMPBSA itself (`interaction_entropy` / `c2_entropy` in `&general`) and parsed from its `*_normal_<model>_IE.dat` and `*_normal_<model>_c2_entropy.dat`, so the reported entropy is the upstream implementation, including its block SEM. The local fallback formulas are used only when those files are missing (results from older versions); they match gmx_MMPBSA except that gmx_MMPBSA uses the gas-phase interaction energy (EEL + VDW) while the fallback uses EEL alone, which changes the number in the second decimal.

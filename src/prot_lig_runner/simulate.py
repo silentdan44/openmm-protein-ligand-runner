@@ -133,9 +133,9 @@ def parse_args():
     )
     parser.add_argument("--mmpbsa-last-ns", type=positive_float,
                         help="Restrict MMPBSA to the final N ns of production")
-    parser.add_argument("--mmpbsa-entropy", choices=("ie", "c2", "both", "none"), default="ie",
+    parser.add_argument("--mmpbsa-entropy", choices=("ie", "c2", "nmode", "both", "none"), default="ie",
                         help="Entropy estimate for MMPBSA: interaction entropy (default), "
-                             "C2 variance, both, or none")
+                             "C2 variance, normal mode, both, or none")
     parser.add_argument("--analysis-stride", type=positive_int, default=10,
                         help="Load every Nth XTC frame for plots and the prepared MMPBSA trajectory")
     parser.add_argument("--mmpbsa-membrane-thickness-angstrom", type=positive_float,

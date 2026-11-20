@@ -120,6 +120,21 @@ def read_gmx_entropy(directory, model="gb"):
             "sem_minus_tds_kcal_mol": float(sem.group(1)) if sem else None,
             "source": matches[0].name,
         }
+    dat = directory / "FINAL_RESULTS_MMPBSA.dat"
+    if dat.is_file():
+        text = dat.read_text(errors="replace")
+        marker = text.find("ENTROPY RESULTS (NMODE APPROXIMATION)")
+        if marker >= 0:
+            match = re.search(
+                r"^ΔTOTAL\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)",
+                text[marker:], re.MULTILINE,
+            )
+            if match:
+                results["nmode"] = {
+                    "minus_tds_kcal_mol": float(match.group(1)),
+                    "sem_minus_tds_kcal_mol": float(match.group(5)),
+                    "source": dat.name,
+                }
     return results
 
 
@@ -157,7 +172,7 @@ def summarize_mmpbsa(path, *, temperature_k=300.0, entropy="ie", mmpbsa_dir=None
     estimators = {"ie": interaction_entropy, "c2": c2_entropy}
     if entropy == "both":
         methods = ["ie", "c2"]
-    elif entropy in estimators:
+    elif entropy in ("ie", "c2", "nmode"):
         methods = [entropy]
     elif entropy == "none":
         methods = []
@@ -170,16 +185,25 @@ def summarize_mmpbsa(path, *, temperature_k=300.0, entropy="ie", mmpbsa_dir=None
     variants = {}
     gmx_estimates = read_gmx_entropy(mmpbsa_dir, model) if mmpbsa_dir is not None else {}
     for method in methods:
-        estimator = estimators[method]
-        running = np.asarray([estimator(eel[: index + 1], temperature_k) for index in range(len(eel))])
+        estimator = estimators.get(method)
+        if estimator is not None:
+            running = np.asarray([estimator(eel[: index + 1], temperature_k) for index in range(len(eel))])
+        else:
+            running = None
         if method in gmx_estimates:
             minus_tds = gmx_estimates[method]["minus_tds_kcal_mol"]
             sem_tds = gmx_estimates[method]["sem_minus_tds_kcal_mol"]
             source = gmx_estimates[method]["source"]
-        else:
+        elif estimator is not None and running is not None:
             minus_tds = float(running[-1])
             sem_tds = block_sem(eel, estimator)
             source = "python"
+        else:
+            raise ValueError(
+                f"{method} entropy needs gmx_MMPBSA output; rerun the MMPBSA calculation"
+            )
+        if running is None:
+            running = np.full(len(eel), minus_tds)
         delta_g = delta_h + minus_tds
         sem_g = float(np.sqrt(sem_h ** 2 + sem_tds ** 2)) if sem_tds is not None else sem_h
         variants[method] = {
@@ -406,6 +430,11 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
         "c2": "c2_entropy=1,",
         "both": "interaction_entropy=1, c2_entropy=1,",
     }.get(entropy, "")
+    nmode_namelist = (
+        "&nmode\n nmstartframe=1, nmendframe=1000000, nminterval=1, nmode_igb=1, "
+        "nmode_istrng=0.0, dielc=1.0, drms=0.001, maxcyc=10000,\n/\n"
+        if entropy == "nmode" else ""
+    )
     pb_radii = 3 if model == "gb" else 4
     input_path.write_text(
         "Single-trajectory protein-ligand binding free-energy estimate.\n"
@@ -414,7 +443,7 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
            if last_ns is not None else "Trajectory window: all available production frames.\n")
         + f"&general\n startframe=1, interval={interval}, PBRadii={pb_radii}, verbose=1, "
         + (entropy_flags + "\n/\n" if entropy_flags else "\n/\n")
-        + model_namelist + decomposition_namelist
+        + model_namelist + nmode_namelist + decomposition_namelist
     )
 
     import mdtraj as md
@@ -696,9 +725,9 @@ def main():
     parser.add_argument("--mmpbsa-ligand",
                         help="Ligand for the MMPBSA estimate: 1-based index (2), label (LIG2), "
                              "or residue label; required when the run has several ligands")
-    parser.add_argument("--mmpbsa-entropy", choices=("ie", "c2", "both", "none"), default="ie",
+    parser.add_argument("--mmpbsa-entropy", choices=("ie", "c2", "nmode", "both", "none"), default="ie",
                         help="Entropy estimate: interaction entropy (default), C2 variance, "
-                             "both (report both, ΔG from IE), or enthalpy only")
+                             "normal mode (small systems), both (IE+C2, ΔG from IE), or enthalpy only")
     parser.add_argument("--mmpbsa-last-ns", type=float,
                         help="Restrict MMPBSA to the final N ns of production")
     parser.add_argument("--analysis-stride", type=int, default=10)
