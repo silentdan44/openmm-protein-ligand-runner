@@ -496,11 +496,17 @@ def _plot_mmpbsa_entropy(output_dir, summary):
 
         frames = np.asarray(summary["frames"], dtype=float)
         delta_h = np.asarray(summary["delta_h_kcal_mol"], dtype=float)
-        minus_tds = np.asarray(summary["minus_tds_kcal_mol"], dtype=float)
         delta_g = np.asarray(summary["delta_g_running_kcal_mol"], dtype=float)
+        variants = summary.get("entropy_variants") or {
+            "ie": {"name": "ie", "minus_tds_running_kcal_mol": summary["minus_tds_kcal_mol"]}
+        }
+        colours = {"ie": "#dc2626", "c2": "#b45309"}
         fig, axes = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True)
         axes[0].plot(frames, delta_h, color="#2563eb", linewidth=1, label="ΔH (MM/PBSA)")
-        axes[0].plot(frames, minus_tds, color="#dc2626", linewidth=1, label="−TΔS (IE)")
+        for method, variant in variants.items():
+            axes[0].plot(frames, np.asarray(variant["minus_tds_running_kcal_mol"], dtype=float),
+                         color=colours.get(method, "#7c3aed"), linewidth=1,
+                         label=f"−TΔS ({method.upper()})")
         axes[0].plot(frames, delta_g, color="#0f766e", linewidth=1.5, label="ΔG estimate")
         axes[0].legend(frameon=False, fontsize=8)
         _axis(axes[0], "Running MMPBSA estimates", "kcal/mol", "Frame")
@@ -555,19 +561,44 @@ def build_report(output_dir, metrics, generated_plots, *, warnings=None):
             value = mmpbsa.get(key)
             return "—" if value is None or not isinstance(value, (int, float)) else f"{value:.2f}"
 
+        variants = mmpbsa.get("entropy_variants") or {
+            "ie": {
+                "name": mmpbsa.get("entropy_method", "ie"),
+                "minus_tds_kcal_mol": mmpbsa.get("minus_tds_kcal_mol_value"),
+                "delta_g_kcal_mol": mmpbsa.get("delta_g_kcal_mol"),
+                "sem_delta_g_kcal_mol": mmpbsa.get("sem_delta_g_kcal_mol"),
+            }
+        }
+        def fmt(value):
+            return "—" if value is None else f"{value:.2f}"
+
+        rows = "".join(
+            "<tr>"
+            f"<td>{number('delta_h_mean_kcal_mol')}</td>"
+            f"<td>{fmt(variant.get('minus_tds_kcal_mol'))}</td>"
+            f"<td>{fmt(variant.get('delta_g_kcal_mol'))}</td>"
+            f"<td>{fmt(variant.get('sem_delta_g_kcal_mol'))}</td>"
+            f"<td>{mmpbsa.get('frame_count', '—')}</td>"
+            f"<td>{html.escape(str(variant.get('name', '—')).upper())}</td>"
+            "</tr>"
+            for variant in variants.values()
+        )
+        if not variants:
+            rows = (
+                "<tr>"
+                f"<td>{number('delta_h_mean_kcal_mol')}</td><td>0.00</td>"
+                f"<td>{number('delta_g_kcal_mol')}</td><td>{number('sem_delta_g_kcal_mol')}</td>"
+                f"<td>{mmpbsa.get('frame_count', '—')}</td><td>NONE</td></tr>"
+            )
         mmpbsa_table = (
             "<h2>MMPBSA free-energy estimate</h2>"
             "<table><thead><tr><th>ΔH (kcal/mol)</th><th>−TΔS (kcal/mol)</th>"
             "<th>ΔG (kcal/mol)</th><th>SEM ΔG</th><th>Frames</th><th>Entropy</th></tr></thead>"
-            f"<tbody><tr><td>{number('delta_h_mean_kcal_mol')}</td>"
-            f"<td>{number('minus_tds_kcal_mol_value')}</td>"
-            f"<td>{number('delta_g_kcal_mol')}</td>"
-            f"<td>{number('sem_delta_g_kcal_mol')}</td>"
-            f"<td>{mmpbsa.get('frame_count', '—')}</td>"
-            f"<td>{html.escape(str(mmpbsa.get('entropy_method', '—')))}</td></tr></tbody></table>"
-            "<p>Single-trajectory MM/PBSA enthalpy plus interaction entropy. This is an "
-            "approximate end-state estimate, useful for ranking ligands under one protocol, "
-            "not a calibrated absolute binding free energy.</p>"
+            f"<tbody>{rows}</tbody></table>"
+            "<p>Single-trajectory MM/PBSA enthalpy plus an entropy estimate. IE is the "
+            "interaction-entropy method; C2 is the variance approximation; they are "
+            "alternatives, not additive. This is an approximate end-state estimate, useful "
+            "for ranking ligands under one protocol, not a calibrated absolute free energy.</p>"
         )
     notes = "".join(f"<li>{html.escape(note)}</li>" for note in (warnings or []))
     links = "\n".join(

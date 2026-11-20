@@ -145,7 +145,14 @@ gmx_MMPBSA estimates one binding affinity per calculation, so a run with several
 
 Omit `--mmpbsa-last-ns` to use all production frames. If the requested window exceeds the available trajectory, all available production frames are used and a warning is logged. `--mmpbsa-interval` samples frames for MMPBSA; `--analysis-stride` independently controls frames loaded for trajectory metrics and plots. Choose `gb`, `pb`, or (for a membrane run) `pb_mem`; `pb_mem` derives the membrane thickness from the phosphate planes unless you pass `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0.
 
-MMPBSA treats water and lipids implicitly while using the full membrane MD trajectory to extract protein and ligand atoms. Results include `analysis/mmpbsa/FINAL_RESULTS_MMPBSA.dat`, `.csv`, `entropy.json`, and `gmx_MMPBSA.log`. The report gives ΔH (MM/PBSA enthalpy), −TΔS from the interaction-entropy method (`--mmpbsa-entropy ie`, the default) or zero (`none`), and ΔG = ΔH − TΔS with a block-estimated SEM. Interaction entropy uses the per-frame protein–ligand electrostatic energy, −TΔS = kT ln⟨exp(ΔEel/kT)⟩ − ⟨ΔEel⟩; the mean is subtracted because it is already in ΔH. It is an approximation, not a full normal-mode or quasi-harmonic entropy, and it needs tens of frames to converge.
+MMPBSA treats water and lipids implicitly while using the full membrane MD trajectory to extract protein and ligand atoms. Results include `analysis/mmpbsa/FINAL_RESULTS_MMPBSA.dat`, `.csv`, `entropy.json`, and `gmx_MMPBSA.log`. The report gives ΔH (MM/PBSA enthalpy) and ΔG = ΔH − TΔS. `--mmpbsa-entropy` selects the entropy estimate:
+
+- `ie` (default): interaction entropy, −TΔS = kT ln⟨exp(ΔEel/kT)⟩ − ⟨ΔEel⟩, using only the fluctuation of the protein–ligand electrostatic energy.
+- `c2`: variance approximation, −TΔS = σ²(ΔEel)/(2RT); cheaper and less sensitive to rare high-energy frames but ignores the shape of the distribution.
+- `both`: report both estimates; ΔG is taken from IE. They are alternatives, not additive.
+- `none`: enthalpy only.
+
+The mean is subtracted in IE because it is already in ΔH. Neither method is a full normal-mode or quasi-harmonic entropy, and both need tens of frames to converge; with a handful of frames the entropy term is a diagnostic, not a number to quote. gmx_MMPBSA 1.7 has its own IE implementation with the same formula and a non-negative clamp, so the two agree; normal-mode entropy is not offered here because minimising every frame of a 27k-atom complex is impractical.
 
 For `pb_mem`, the membrane thickness is estimated from the lipid phosphate planes of the built system unless `--mmpbsa-membrane-thickness-angstrom` is given. Per-leaflet medians with a MAD cut are used, so flipped phosphates do not move the plane; `analysis/mmpbsa/membrane_planes.json` records the planes, counts and rejected atoms, and `mmpbsa_membrane_planes.png` shows the selection. The membrane dielectric defaults to 7.0 (`--mmpbsa-membrane-dielectric`).
 

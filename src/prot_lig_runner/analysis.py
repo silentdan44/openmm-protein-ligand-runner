@@ -30,6 +30,7 @@ from .analysis_plots import (
 
 logger = logging.getLogger(__name__)
 K_B_KCAL_PER_MOL_K = 0.00198720425864083
+R_KCAL_PER_MOL_K = K_B_KCAL_PER_MOL_K
 
 
 def read_state_data(path):
@@ -65,11 +66,35 @@ def interaction_entropy(electrostatics_kcal, temperature_k):
     kt = K_B_KCAL_PER_MOL_K * float(temperature_k)
     maximum = float(values.max())
     free_energy = maximum + kt * float(np.log(np.mean(np.exp((values - maximum) / kt))))
-    return float(free_energy - values.mean())
+    # The fluctuation term is non-negative in the thermodynamic limit; small
+    # negative values are sampling noise. gmx_MMPBSA clamps the same way.
+    return max(0.0, float(free_energy - values.mean()))
+
+
+def c2_entropy(electrostatics_kcal, temperature_k):
+    """Estimate -TΔS from the C2 (variance) entropy approximation.
+
+    −TΔS = σ²(E_el) / (2 R T). Like interaction entropy this uses only the
+    fluctuation of the protein–ligand electrostatic energy, but it keeps just
+    the second moment, so it is cheaper and less sensitive to rare high-energy
+    frames than the log-mean-exp form.
+    """
+    import numpy as np
+
+    values = np.asarray(electrostatics_kcal, dtype=float)
+    if values.size == 0:
+        raise ValueError("C2 entropy needs at least one frame")
+    temperature = float(temperature_k)
+    return float(np.var(values, ddof=1) / (2.0 * R_KCAL_PER_MOL_K * temperature)) if values.size > 1 else 0.0
 
 
 def summarize_mmpbsa(path, *, temperature_k=300.0, entropy="ie"):
-    """Summarise per-frame MMPBSA terms, add interaction entropy and errors."""
+    """Summarise per-frame MMPBSA terms, add entropy estimates and errors.
+
+    ``entropy`` selects the entropy model: ``ie`` (interaction entropy),
+    ``c2`` (variance entropy), ``both`` (report both, ΔG from IE) or ``none``
+    (enthalpy only). The two estimates are alternatives, not additive.
+    """
     import numpy as np
 
     rows = read_mmpbsa_delta_csv(path)
@@ -84,33 +109,60 @@ def summarize_mmpbsa(path, *, temperature_k=300.0, entropy="ie"):
     enthalpy = np.asarray([row[total_key] for row in rows], dtype=float)
     eel = np.asarray([row[eel_key] for row in rows], dtype=float)
 
-    running_enthalpy = np.cumsum(enthalpy) / np.arange(1, len(enthalpy) + 1)
-    running_entropy = np.asarray(
-        [interaction_entropy(eel[: index + 1], temperature_k) for index in range(len(eel))]
-    ) if entropy == "ie" else np.zeros(len(eel))
-    running_free = running_enthalpy + running_entropy
-
     def sem(values):
         return float(np.std(values, ddof=1) / np.sqrt(len(values))) if len(values) > 1 else float("nan")
 
-    def block_sem(values, blocks=5):
+    def block_sem(values, estimator, blocks=5):
         if len(values) < 2 * blocks:
-            return float("nan")
+            return None
         chunks = np.array_split(values, blocks)
-        estimates = [interaction_entropy(chunk, temperature_k) for chunk in chunks]
+        estimates = [estimator(chunk, temperature_k) for chunk in chunks]
         return float(np.std(estimates, ddof=1) / np.sqrt(blocks))
 
-    delta_h = float(enthalpy.mean())
-    minus_tds = float(running_entropy[-1]) if entropy == "ie" else 0.0
-    sem_h = sem(enthalpy)
-    sem_tds = block_sem(eel) if entropy == "ie" else 0.0
-    delta_g = delta_h + minus_tds
-    if np.isfinite(sem_tds):
-        sem_g = float(np.sqrt(sem_h ** 2 + sem_tds ** 2))
+    estimators = {"ie": interaction_entropy, "c2": c2_entropy}
+    if entropy == "both":
+        methods = ["ie", "c2"]
+    elif entropy in estimators:
+        methods = [entropy]
+    elif entropy == "none":
+        methods = []
     else:
-        # Too few frames for a block estimate of the ensemble-level entropy;
-        # report the enthalpy SEM and keep the unknown entropy SEM explicit.
+        raise ValueError(f"Unknown entropy model: {entropy}")
+
+    delta_h = float(enthalpy.mean())
+    sem_h = sem(enthalpy)
+    running_enthalpy = np.cumsum(enthalpy) / np.arange(1, len(enthalpy) + 1)
+    variants = {}
+    for method in methods:
+        estimator = estimators[method]
+        running = np.asarray([estimator(eel[: index + 1], temperature_k) for index in range(len(eel))])
+        sem_tds = block_sem(eel, estimator)
+        delta_g = delta_h + float(running[-1])
+        sem_g = float(np.sqrt(sem_h ** 2 + sem_tds ** 2)) if sem_tds is not None else sem_h
+        variants[method] = {
+            "name": method,
+            "minus_tds_kcal_mol": float(running[-1]),
+            "minus_tds_running_kcal_mol": running.tolist(),
+            "delta_g_kcal_mol": float(delta_g),
+            "delta_g_running_kcal_mol": (running_enthalpy + running).tolist(),
+            "sem_minus_tds_kcal_mol": sem_tds,
+            "sem_delta_g_kcal_mol": sem_g,
+        }
+
+    primary = methods[0] if methods else None
+    running_enthalpy = np.cumsum(enthalpy) / np.arange(1, len(enthalpy) + 1)
+    if primary:
+        minus_tds = variants[primary]["minus_tds_kcal_mol"]
+        delta_g = variants[primary]["delta_g_kcal_mol"]
+        sem_tds = variants[primary]["sem_minus_tds_kcal_mol"]
+        sem_g = variants[primary]["sem_delta_g_kcal_mol"]
+        running_entropy = np.asarray(variants[primary]["minus_tds_running_kcal_mol"])
+    else:
+        minus_tds = 0.0
+        delta_g = delta_h
+        sem_tds = 0.0
         sem_g = sem_h
+        running_entropy = np.zeros(len(eel))
     return {
         "entropy_method": entropy,
         "temperature_k": float(temperature_k),
@@ -119,15 +171,17 @@ def summarize_mmpbsa(path, *, temperature_k=300.0, entropy="ie"):
         "delta_h_kcal_mol": enthalpy.tolist(),
         "delta_eel_kcal_mol": eel.tolist(),
         "minus_tds_kcal_mol": running_entropy.tolist(),
-        "delta_g_running_kcal_mol": running_free.tolist(),
+        "delta_g_running_kcal_mol": (running_enthalpy + running_entropy).tolist(),
         "delta_h_mean_kcal_mol": delta_h,
-        "minus_tds_kcal_mol_value": minus_tds,
+        "minus_tds_kcal_mol_value": float(minus_tds),
         "delta_g_kcal_mol": float(delta_g),
         "sem_delta_h_kcal_mol": sem_h,
-        "sem_minus_tds_kcal_mol": sem_tds if np.isfinite(sem_tds) else None,
+        "sem_minus_tds_kcal_mol": sem_tds,
         "sem_delta_g_kcal_mol": sem_g,
-        "note": "Single-trajectory MM/PBSA enthalpy plus interaction entropy; an "
-                "approximate end-state estimate, not a calibrated absolute free energy.",
+        "entropy_variants": variants,
+        "note": "Single-trajectory MM/PBSA enthalpy plus an entropy estimate "
+                "(interaction entropy, C2 variance, or both); an approximate "
+                "end-state value, not a calibrated absolute free energy.",
     }
 
 
@@ -588,8 +642,9 @@ def main():
     parser.add_argument("--mmpbsa-ligand",
                         help="Ligand for the MMPBSA estimate: 1-based index (2), label (LIG2), "
                              "or residue label; required when the run has several ligands")
-    parser.add_argument("--mmpbsa-entropy", choices=("ie", "none"), default="ie",
-                        help="Entropy correction: interaction entropy (default) or enthalpy only")
+    parser.add_argument("--mmpbsa-entropy", choices=("ie", "c2", "both", "none"), default="ie",
+                        help="Entropy estimate: interaction entropy (default), C2 variance, "
+                             "both (report both, ΔG from IE), or enthalpy only")
     parser.add_argument("--mmpbsa-last-ns", type=float,
                         help="Restrict MMPBSA to the final N ns of production")
     parser.add_argument("--analysis-stride", type=int, default=10)

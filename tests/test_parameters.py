@@ -6,6 +6,7 @@ import numpy as np
 
 from prot_lig_runner.analysis import (
     _wrap_selection_into_box,
+    c2_entropy,
     interaction_entropy,
     summarize_mmpbsa,
 )
@@ -74,6 +75,15 @@ class InteractionEntropyTests(unittest.TestCase):
         self.assertGreater(interaction_entropy(values, 300.0), 0.0)
 
 
+    def test_c2_matches_variance_formula(self):
+        values = np.array([-10.0, -12.0, -8.0, -14.0])
+        expected = np.var(values, ddof=1) / (2.0 * K_B * 300.0)
+        self.assertAlmostEqual(c2_entropy(values, 300.0), expected, places=9)
+
+    def test_c2_is_zero_for_constant_electrostatics(self):
+        self.assertAlmostEqual(c2_entropy([-9.0, -9.0, -9.0], 300.0), 0.0, places=9)
+
+
 class SummarizeMmpbsaTests(unittest.TestCase):
     CSV = (
         "GENERALIZED BORN:\r\n"
@@ -104,6 +114,21 @@ class SummarizeMmpbsaTests(unittest.TestCase):
             summary = summarize_mmpbsa(path, temperature_k=300.0, entropy="none")
         self.assertAlmostEqual(summary["delta_g_kcal_mol"], -13.0, places=6)
         self.assertEqual(summary["minus_tds_kcal_mol_value"], 0.0)
+        self.assertEqual(summary["entropy_variants"], {})
+
+    def test_both_reports_ie_and_c2_but_uses_ie_for_delta_g(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "FINAL_RESULTS_MMPBSA.csv"
+            path.write_text(self.CSV)
+            summary = summarize_mmpbsa(path, temperature_k=300.0, entropy="both")
+        variants = summary["entropy_variants"]
+        self.assertEqual(set(variants), {"ie", "c2"})
+        self.assertAlmostEqual(variants["ie"]["minus_tds_kcal_mol"], summary["minus_tds_kcal_mol_value"], places=9)
+        self.assertAlmostEqual(
+            variants["c2"]["minus_tds_kcal_mol"],
+            c2_entropy([-20.0, -12.0, -16.0], 300.0), places=9,
+        )
+        self.assertAlmostEqual(summary["delta_g_kcal_mol"], -13.0 + variants["ie"]["minus_tds_kcal_mol"], places=9)
 
 
 class WrapComplexTests(unittest.TestCase):
