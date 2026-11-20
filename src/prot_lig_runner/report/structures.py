@@ -31,11 +31,11 @@ def draw_ligand(sdf_path, output_png, output_svg=None, *, label=None) -> bool:
         return False
     AllChem.Compute2DCoords(molecule)
     options = rdMolDraw2D.MolDrawOptions()
-    options.bondLineWidth = 2.2
-    options.fixedBondLength = 46
+    options.bondLineWidth = 7.0
+    options.fixedBondLength = 52
     options.baseFontSize = 0.85
-    options.minFontSize = 26
-    options.maxFontSize = 46
+    options.minFontSize = 34
+    options.maxFontSize = 54
     options.padding = 0.08
     options.explicitMethyl = True
     options.additionalAtomLabelPadding = 0.08
@@ -50,6 +50,27 @@ def draw_ligand(sdf_path, output_png, output_svg=None, *, label=None) -> bool:
     rdMolDraw2D.PrepareAndDrawMolecule(drawer, molecule, legend=label or "")
     drawer.FinishDrawing()
     Path(output_png).write_bytes(drawer.GetDrawingText())
+
+    # Cropped thumbnail for tables: trims the white canvas so the structure is
+    # legible at ~40 px in an HTML table or a PDF cell.
+    try:
+        from PIL import Image, ImageChops
+
+        image = Image.open(output_png).convert("RGB")
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        box = ImageChops.difference(image, background).getbbox()
+        if box:
+            margin = 8
+            box = (max(0, box[0] - margin), max(0, box[1] - margin),
+                   min(image.width, box[2] + margin), min(image.height, box[3] + margin))
+            crop = image.crop(box)
+            side = max(crop.size)
+            canvas = Image.new("RGB", (side, side), (255, 255, 255))
+            canvas.paste(crop, ((side - crop.width) // 2, (side - crop.height) // 2))
+            canvas.thumbnail((400, 400), Image.LANCZOS)
+            canvas.save(Path(output_png).with_name(Path(output_png).stem + "_thumb.png"))
+    except Exception as error:  # noqa: BLE001 - thumbnail is best effort
+        logger.warning("Could not build a thumbnail for %s: %s", output_png, error)
 
     if output_svg is not None:
         svg = rdMolDraw2D.MolDraw2DSVG(800, 600)

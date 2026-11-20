@@ -13,6 +13,7 @@ def _summary_rows(dataset: RunDataset):
     rows = []
     for label, stats in ligands.items():
         rows.append([
+            "",
             label,
             str(stats.get("residue", "")),
             f"{stats.get('ligand_rmsd_nm_mean', 0):.2f}",
@@ -44,12 +45,14 @@ def _mmpbsa_rows(dataset: RunDataset):
     return rows, title
 
 
-def _draw_table(figure, rows, header, *, top, height, left=0.08, width=0.62, fontsize=7):
+def _draw_table(figure, rows, header, *, top, height, left=0.06, width=0.72, fontsize=7,
+                images=None, col_widths=None):
     if not rows:
         return
     axes = figure.add_axes([left, top - height, width, height])
     axes.axis("off")
-    table = axes.table(cellText=rows, colLabels=header, loc="upper left", cellLoc="left")
+    table = axes.table(cellText=rows, colLabels=header, loc="upper left", cellLoc="left",
+                       colWidths=col_widths)
     table.auto_set_font_size(False)
     table.set_fontsize(fontsize)
     table.scale(1.0, 1.25)
@@ -58,6 +61,30 @@ def _draw_table(figure, rows, header, *, top, height, left=0.08, width=0.62, fon
         cell.set_edgecolor("0.75")
         if row == 0:
             cell.set_text_props(weight="bold")
+    if images:
+        from matplotlib.image import imread
+
+        bbox = axes.get_position()
+        for row_index, image_path in images.items():
+            cell = table[(row_index, 0)]
+            x, y, width_cell, height_cell = (
+                cell.get_x(), cell.get_y(), cell.get_width(), cell.get_height()
+            )
+            if not image_path.is_file():
+                continue
+            try:
+                image = imread(image_path)
+            except (OSError, ValueError, SyntaxError):
+                continue
+            inset = figure.add_axes([
+                bbox.x0 + x * bbox.width + 0.005,
+                bbox.y0 + y * bbox.height + 0.004,
+                width_cell * bbox.width * 0.95,
+                height_cell * bbox.height * 0.9,
+            ])
+            inset.imshow(image)
+            inset.axis("off")
+    return table
 
 
 def _draw_summary(figure, dataset: RunDataset, warnings: list[str], total_pages: int):
@@ -83,19 +110,51 @@ def _draw_summary(figure, dataset: RunDataset, warnings: list[str], total_pages:
     if lines:
         figure.text(0.08, 0.83, "  ·  ".join(lines), fontsize=7.5, va="top", color="0.2")
 
-    _draw_table(figure, _summary_rows(dataset),
-                ["Ligand", "Residue", "RMSD (nm)", "Contacts", "H-bonds"],
-                top=0.78, height=0.05 + 0.022 * len(_summary_rows(dataset)))
+    ligand_rows = _summary_rows(dataset)
+    ligand_images = {
+        index: dataset.analysis / f"ligand_structure_{row[1]}.png"
+        for index, row in enumerate(ligand_rows, start=1)
+    }
+    table_height = 0.05 + 0.06 * len(ligand_rows)
+    table_obj = _draw_table(figure, ligand_rows,
+                ["", "Ligand", "Residue", "RMSD (nm)", "Contacts", "H-bonds"],
+                top=0.80, height=table_height,
+                col_widths=[0.26, 0.12, 0.18, 0.14, 0.14, 0.14])
+    figure.canvas.draw()
+    table_bbox = (table_obj.get_window_extent(figure.canvas.get_renderer()).transformed(
+        figure.transFigure.inverted()
+    ) if table_obj is not None else None)
+    # Draw the structure thumbnails in the reserved first column; positions
+    # come from the table geometry so they line up with their rows.
+    import matplotlib.image as mpimg
+
+    row_height = table_bbox.height / (len(ligand_rows) + 1)
+    for index, row in enumerate(ligand_rows, start=1):
+        thumb = dataset.analysis / f"ligand_structure_{row[1]}_thumb.png"
+        image_path = thumb if thumb.is_file() else dataset.analysis / f"ligand_structure_{row[1]}.png"
+        if not image_path.is_file():
+            continue
+        try:
+            image = mpimg.imread(image_path)
+        except (OSError, ValueError, SyntaxError):
+            continue
+        y = table_bbox.y1 - (index + 0.93) * row_height
+        inset = figure.add_axes([table_bbox.x0 + 0.004, y, 0.21, row_height * 0.9])
+        inset.imshow(image)
+        inset.axis("off")
+    table_bottom = 0.80 - (0.05 + 0.115 * len(ligand_rows))
     mmpbsa_rows, title = _mmpbsa_rows(dataset)
-    table_top = 0.78 - (0.07 + 0.022 * max(1, len(_summary_rows(dataset))))
+    table_top = table_bottom - 0.04
     if mmpbsa_rows:
         figure.text(0.08, table_top + 0.02, title, fontsize=9, weight="bold", va="bottom")
         _draw_table(figure, mmpbsa_rows, ["Entropy", "dH", "-TdS", "dG", "SEM dG"],
                     top=table_top, height=0.04 + 0.022 * len(mmpbsa_rows))
+        table_top = table_top - (0.06 + 0.022 * len(mmpbsa_rows))
     if warnings:
-        figure.text(0.08, 0.16, "Notes", fontsize=8, weight="bold", va="top")
-        figure.text(0.08, 0.14, "\n".join(f"- {note}" for note in warnings),
-                    fontsize=7, va="top", color="0.25")
+        notes_top = max(0.10, table_top - 0.10)
+        figure.text(0.06, notes_top, "Notes", fontsize=8, weight="bold", va="top")
+        figure.text(0.06, notes_top - 0.018, "\n".join(f"- {note}" for note in warnings),
+                    fontsize=7.5, va="top", color="0.25")
     figure.text(0.92, 0.03, f"1 / {total_pages}", fontsize=8, ha="right", color="0.4")
 
 
@@ -127,11 +186,11 @@ def build_pdf(dataset: RunDataset, figures: dict[str, list[Path]], *,
                     continue
                 height, width = image.shape[:2]
                 figure = plt.figure(figsize=(8.27, 11.69))
-                figure.text(
-                    0.06, 0.955,
-                    f"{SECTION_TITLES.get(section, section)}: {figure_caption(image_path, dataset)}",
-                    fontsize=11, weight="bold", va="top",
-                )
+                import textwrap
+
+                title = f"{SECTION_TITLES.get(section, section)}: {figure_caption(image_path, dataset)}"
+                figure.text(0.06, 0.96, textwrap.fill(title, 92), fontsize=9,
+                            weight="bold", va="top")
                 # Keep the plot's aspect ratio inside the A4 page.
                 page_ratio = 0.86 * 8.27 / (0.84 * 11.69)
                 image_ratio = width / height

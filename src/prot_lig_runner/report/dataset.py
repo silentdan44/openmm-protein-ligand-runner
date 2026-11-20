@@ -169,7 +169,8 @@ class RunDataset:
     @property
     def planned_ns(self) -> float | None:
         config = self.configuration
-        steps = config.get("prod_steps")
+        steps = sum(float(config.get(key) or 0) for key in
+                    ("nvt_steps", "npt_steps", "prod_steps")) or config.get("prod_steps")
         dt_ps = config.get("timestep_ps") or config.get("timestep_fs", 0) / 1000.0
         if steps and dt_ps:
             return float(steps) * float(dt_ps) / 1000.0

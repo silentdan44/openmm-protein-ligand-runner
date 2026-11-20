@@ -32,6 +32,9 @@ def collect_figures(dataset: RunDataset) -> dict[str, list[Path]]:
             for path in sorted(dataset.analysis.glob(pattern)):
                 if path.name in DEPRECATED_FIGURES or path in seen:
                     continue
+                if path.stem.startswith("ligand_structure"):
+                    # Structures live in the ligand table, not as full pages.
+                    continue
                 seen.append(path)
         # The combined ligand figure is superseded by the per-ligand ones.
         per_ligand = [path for path in seen if path.stem.startswith("ligand_pocket_LIG")]
@@ -68,14 +71,19 @@ def _status_block(status: dict) -> str:
     )
 
 
-def _ligand_table(metrics: dict) -> str:
-    ligands = (metrics.get("trajectory_metrics") or {}).get("ligands") or {}
+def _ligand_table(dataset: RunDataset) -> str:
+    ligands = (dataset.metrics.get("trajectory_metrics") or {}).get("ligands") or {}
     if not ligands:
         return ""
     rows = []
     for label, stats in ligands.items():
+        thumb_path = dataset.analysis / f"ligand_structure_{label}_thumb.png"
+        image = thumb_path if thumb_path.is_file() else dataset.analysis / f"ligand_structure_{label}.png"
+        thumb = (f'<img class="thumb" src="{html.escape(image.name)}" alt="{label}">'
+                 if image.is_file() else "")
         rows.append(
             "<tr>"
+            f"<td>{thumb}</td>"
             f"<td>{html.escape(label)}</td>"
             f"<td>{html.escape(str(stats.get('residue', '')))}</td>"
             f"<td>{stats.get('ligand_rmsd_nm_mean', 0):.2f}</td>"
@@ -84,7 +92,7 @@ def _ligand_table(metrics: dict) -> str:
             "</tr>"
         )
     return (
-        '<table class="ligands"><thead><tr><th>Ligand</th><th>Residue</th>'
+        '<table class="ligands"><thead><tr><th>Structure</th><th>Ligand</th><th>Residue</th>'
         "<th>RMSD (nm)</th><th>Contacts</th><th>H-bonds</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
@@ -139,7 +147,7 @@ def build_report(dataset: RunDataset, *, only: tuple[str, ...] | None = None,
         available = status["availability"][section]
         body = ""
         if section == "ligands":
-            body += "<h3>Per-ligand summary</h3>" + _ligand_table(dataset.metrics)
+            body += "<h3>Per-ligand summary</h3>" + _ligand_table(dataset)
         if section == "mmpbsa":
             body += _mmpbsa_table(dataset.mmpbsa)
         if figures[section]:
@@ -183,7 +191,9 @@ figure {{ margin: 0 0 24px; }}
 figure img {{ max-width: 100%; border: 1px solid #eee; border-radius: 6px; }}
 figcaption {{ color: #555; font-size: 0.85em; }}
 table {{ border-collapse: collapse; margin: 12px 0 20px; }}
-table.ligands {{ width: auto; max-width: 620px; }}
+table.ligands {{ width: auto; max-width: 720px; }}
+table.ligands td:first-child {{ width: 84px; }}
+img.thumb {{ height: 56px; display: block; }}
 th, td {{ border-bottom: 1px solid #ddd; padding: 6px 12px; text-align: left; font-size: 0.9em; }}
 section {{ margin-bottom: 40px; }}
 </style>
