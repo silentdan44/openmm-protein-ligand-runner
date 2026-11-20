@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .dataset import RunDataset, SECTIONS, SECTION_TITLES, figure_title
+from .dataset import RunDataset, SECTIONS, SECTION_TITLES, figure_caption
 from .pdf import build_pdf
 
 # Superseded by mmpbsa_decomposition.png; keep old results readable but do not
@@ -21,20 +21,6 @@ SECTION_PATTERNS = {
     "membrane": ("membrane_*.png",),
     "mmpbsa": ("mmpbsa_*.png",),
 }
-
-
-def figure_caption(path: Path, dataset: RunDataset) -> str:
-    """Human caption, naming the ligand whenever the figure is ligand-specific."""
-    stem = path.stem
-    ligands = (dataset.metrics.get("trajectory_metrics") or {}).get("ligands") or {}
-    for label, stats in ligands.items():
-        residue = stats.get("residue", "")
-        if stem.endswith(f"_{label}"):
-            if stem.startswith("ligand_structure"):
-                return f"{label} ({residue}): 2D structure"
-            if stem.startswith("ligand_pocket"):
-                return f"{label} ({residue}): RMSD, contacts and hydrogen bonds"
-    return figure_title(path)
 
 
 def collect_figures(dataset: RunDataset) -> dict[str, list[Path]]:
@@ -111,8 +97,14 @@ def _mmpbsa_table(summary: dict | None) -> str:
     if not summary:
         return "<p>MMPBSA has not run yet for this trajectory.</p>"
     variants = summary.get("entropy_variants") or {}
+    ligand = summary.get("ligand")
+    residue = summary.get("ligand_residue") or ""
+    heading = "MMPBSA free-energy estimate"
+    if ligand:
+        heading += f" — {ligand}" + (f" ({residue})" if residue else "")
+    prefix = f"<h3>{html.escape(heading)}</h3>"
     if not variants:
-        return (
+        return prefix + (
             "<p>ΔH = {:.2f} kcal/mol (enthalpy only, {} frames).</p>".format(
                 summary.get("delta_h_mean_kcal_mol", 0.0), summary.get("frame_count", 0)
             )
@@ -130,7 +122,7 @@ def _mmpbsa_table(summary: dict | None) -> str:
         "</tr>"
         for variant in variants.values()
     )
-    return (
+    return prefix + (
         "<table><thead><tr><th>Entropy</th><th>ΔH</th><th>−TΔS</th>"
         f"<th>ΔG</th><th>SEM ΔG</th></tr></thead><tbody>{rows}</tbody></table>"
         f"<p>{summary.get('frame_count', 0)} frames at "

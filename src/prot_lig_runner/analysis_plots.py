@@ -239,12 +239,32 @@ def _plot_trajectory(output_dir, data):
             generated.append("ligand_comparison.png")
 
     contacts = data.get("contact_occupancy", [])
+    ligand_names = {ligand.get("residue") or ligand.get("residue_label"): ligand.get("label")
+                    for ligand in data.get("ligands", [])}
     if contacts:
         def contact_plot(plt):
+            groups = {}
+            for row in contacts:
+                groups.setdefault(row.get("ligand_residue"), []).append(row)
+            if len(groups) > 1:
+                order = [ligand.get("residue") or ligand.get("residue_label")
+                         for ligand in data.get("ligands", [])]
+                ordered = sorted(groups, key=lambda key: order.index(key) if key in order else len(order))
+                fig, axes = plt.subplots(len(ordered), 1, figsize=(10, 3.2 * len(ordered)),
+                                         constrained_layout=True, squeeze=False)
+                for ax, residue in zip(axes[:, 0], ordered):
+                    rows = groups[residue]
+                    label = ligand_names.get(residue, residue or "ligand")
+                    top = sorted(rows, key=lambda row: row["occupancy"], reverse=True)[:15][::-1]
+                    ax.barh([row["protein_residue"] for row in top],
+                            [row["occupancy"] for row in top], color="#0f766e")
+                    ax.set_xlim(0, 1)
+                    _axis(ax, f"{label} ({residue}): protein contacts", "Residue", "Fraction of frames")
+                return fig
             rows = contacts[:20][::-1]
             fig, ax = plt.subplots(figsize=(10, max(4, len(rows) * 0.28)), constrained_layout=True)
-            labels = [row["protein_residue"] for row in rows]
-            ax.barh(labels, [row["occupancy"] for row in rows], color="#0f766e")
+            ax.barh([row["protein_residue"] for row in rows],
+                    [row["occupancy"] for row in rows], color="#0f766e")
             ax.set_xlim(0, 1)
             _axis(ax, "Protein–ligand contact occupancy (top 20)", "Fraction of frames", "Residue")
             return fig
@@ -254,10 +274,29 @@ def _plot_trajectory(output_dir, data):
     hbonds = data.get("hbond_occupancy", [])
     if hbonds:
         def hbond_plot(plt):
+            groups = {}
+            for row in hbonds:
+                groups.setdefault(row.get("ligand_residue"), []).append(row)
+            if len(groups) > 1:
+                order = [ligand.get("residue") or ligand.get("residue_label")
+                         for ligand in data.get("ligands", [])]
+                ordered = sorted(groups, key=lambda key: order.index(key) if key in order else len(order))
+                fig, axes = plt.subplots(len(ordered), 1, figsize=(10, 3.0 * len(ordered)),
+                                         constrained_layout=True, squeeze=False)
+                for ax, residue in zip(axes[:, 0], ordered):
+                    rows = groups[residue]
+                    label = ligand_names.get(residue, residue or "ligand")
+                    top = sorted(rows, key=lambda row: row["occupancy"], reverse=True)[:12][::-1]
+                    ax.barh([f'{row["protein_residue"]} {row["protein_atom"]}–{row["ligand_atom"]}'
+                             for row in top],
+                            [row["occupancy"] for row in top], color="#7c3aed")
+                    ax.set_xlim(0, 1)
+                    _axis(ax, f"{label} ({residue}): hydrogen bonds", "Interaction", "Fraction of frames")
+                return fig
             rows = hbonds[:20][::-1]
-            labels = [f'{row["protein_residue"]} {row["protein_atom"]}–{row["ligand_atom"]}' for row in rows]
             fig, ax = plt.subplots(figsize=(10, max(4, len(rows) * 0.3)), constrained_layout=True)
-            ax.barh(labels, [row["occupancy"] for row in rows], color="#7c3aed")
+            ax.barh([f'{row["protein_residue"]} {row["protein_atom"]}–{row["ligand_atom"]}' for row in rows],
+                    [row["occupancy"] for row in rows], color="#7c3aed")
             ax.set_xlim(0, 1)
             _axis(ax, "Protein–ligand hydrogen-bond occupancy", "Fraction of frames", "Interaction")
             return fig

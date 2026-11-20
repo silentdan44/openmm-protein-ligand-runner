@@ -36,6 +36,20 @@ FIGURE_TITLES = {
 }
 
 
+def figure_caption(path: Path, dataset: RunDataset) -> str:
+    """Human caption, naming the ligand whenever the figure is ligand-specific."""
+    stem = path.stem
+    ligands = (dataset.metrics.get("trajectory_metrics") or {}).get("ligands") or {}
+    for label, stats in ligands.items():
+        residue = stats.get("residue", "")
+        if stem.endswith(f"_{label}"):
+            if stem.startswith("ligand_structure"):
+                return f"{label} ({residue}): 2D structure"
+            if stem.startswith("ligand_pocket"):
+                return f"{label} ({residue}): RMSD, contacts and hydrogen bonds"
+    return figure_title(path)
+
+
 def figure_title(path) -> str:
     return FIGURE_TITLES.get(path.stem, path.stem.replace("_", " ").capitalize())
 

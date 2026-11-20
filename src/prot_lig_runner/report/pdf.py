@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
-from .dataset import RunDataset, SECTION_TITLES, figure_title
+from .dataset import RunDataset, SECTION_TITLES, figure_caption, figure_title
 
 
 def _summary_page_text(dataset: RunDataset, warnings: list[str]) -> list[str]:
@@ -127,7 +127,7 @@ def build_pdf(dataset: RunDataset, figures: dict[str, list[Path]], *,
                 figure = plt.figure(figsize=(8.27, 11.69))
                 figure.text(
                     0.06, 0.955,
-                    f"{SECTION_TITLES.get(section, section)}: {figure_title(image_path)}",
+                    f"{SECTION_TITLES.get(section, section)}: {figure_caption(image_path, dataset)}",
                     fontsize=11, weight="bold", va="top",
                 )
                 # Keep the plot's aspect ratio inside the A4 page.
