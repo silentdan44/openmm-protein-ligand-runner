@@ -1,5 +1,7 @@
 """Topology export helpers for GROMACS and MMPBSA."""
 
+from pathlib import Path
+
 from .analysis_metrics import resolve_ligand, _residue_number
 
 
@@ -85,6 +87,68 @@ def mmpbsa_complex_selection(topology, protein_residues, ligand_selector=None):
     return selection, discarded
 
 
+def deduplicate_atomtypes(top_path):
+    """Collapse per-atom SMIRNOFF atom types into equivalent 1-4-9 types.
+
+    Interchange writes one atom type per atom for SMIRNOFF systems. ParmEd,
+    which gmx_MMPBSA uses for the GROMACS→Amber conversion, turns that into
+    NTYPES == NATOM, and the quadratic NONBONDED_PARM_INDEX makes the Amber
+    prmtop tens of gigabytes (observed: 18 GB for a 27k-atom complex), which
+    then exhausts memory in sander. Types that share element, particle type,
+    sigma and epsilon are physically identical, so they are merged.
+    """
+    path = Path(top_path)
+    lines = path.read_text().splitlines()
+    section = None
+    type_map = {}
+    canonical = {}
+    emitted = set()
+    pair_seen = set()
+    output = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1].strip()
+            output.append(line)
+            continue
+        if not stripped or stripped.startswith(";"):
+            output.append(line)
+            continue
+        columns = stripped.split()
+        if section == "atomtypes" and len(columns) >= 7:
+            name = columns[0]
+            offset = 1 if columns[1].isdigit() else 2
+            key = (
+                columns[offset],
+                columns[offset + 3] if len(columns) >= offset + 6 else "",
+                format(float(columns[-2]), ".6f"),
+                format(float(columns[-1]), ".6f"),
+            )
+            canonical.setdefault(key, name)
+            type_map[name] = canonical[key]
+            if canonical[key] == name and name not in emitted:
+                emitted.add(name)
+                output.append(line)
+            continue
+        if section == "atoms" and len(columns) >= 6:
+            columns[1] = type_map.get(columns[1], columns[1])
+            output.append(" ".join(columns))
+            continue
+        if section == "nonbond_params" and len(columns) >= 5:
+            first = type_map.get(columns[0], columns[0])
+            second = type_map.get(columns[1], columns[1])
+            if first > second:
+                first, second = second, first
+            if (first, second) in pair_seen:
+                continue
+            pair_seen.add((first, second))
+            columns[0], columns[1] = first, second
+            output.append(" ".join(columns))
+            continue
+        output.append(line)
+    path.write_text("\n".join(output) + "\n")
+
+
 def export_mmpbsa_complex(forcefield, modeller, output_dir, protein_residues, ligand_selector=None):
     """Export a dry protein-ligand topology; solvent and lipids stay implicit.
 
@@ -123,4 +187,5 @@ def export_mmpbsa_complex(forcefield, modeller, output_dir, protein_residues, li
     if complex_modeller.topology.getPeriodicBoxVectors():
         interchange.box = complex_modeller.topology.getPeriodicBoxVectors()
     interchange.to_top(str(output_dir / "mmpbsa_complex.top"))
+    deduplicate_atomtypes(output_dir / "mmpbsa_complex.top")
     interchange.to_gro(str(output_dir / "mmpbsa_complex.gro"))

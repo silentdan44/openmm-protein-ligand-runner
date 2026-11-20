@@ -51,9 +51,11 @@ def read_state_data(path):
 def interaction_entropy(electrostatics_kcal, temperature_k):
     """Estimate -TΔS by the interaction-entropy method (Duan et al.).
 
-    −TΔS = kT ln⟨exp(ΔE_el/kT)⟩ over the sampled frames, where ΔE_el is the
-    protein–ligand electrostatic interaction energy. Uses a shifted log-mean-exp
-    so strong favourable energies do not underflow.
+    −TΔS = kT ln⟨exp(ΔE_el/kT)⟩ − ⟨ΔE_el⟩. The mean electrostatics are already
+    part of the MMPBSA enthalpy, so only the fluctuation term is the entropy
+    contribution; without the subtraction the electrostatics would be counted
+    twice. Uses a shifted log-mean-exp so strong favourable energies do not
+    underflow.
     """
     import numpy as np
 
@@ -62,8 +64,8 @@ def interaction_entropy(electrostatics_kcal, temperature_k):
         raise ValueError("Interaction entropy needs at least one frame")
     kt = K_B_KCAL_PER_MOL_K * float(temperature_k)
     maximum = float(values.max())
-    minus_tds = maximum + kt * float(np.log(np.mean(np.exp((values - maximum) / kt))))
-    return float(minus_tds)
+    free_energy = maximum + kt * float(np.log(np.mean(np.exp((values - maximum) / kt))))
+    return float(free_energy - values.mean())
 
 
 def summarize_mmpbsa(path, *, temperature_k=300.0, entropy="ie"):
@@ -103,7 +105,12 @@ def summarize_mmpbsa(path, *, temperature_k=300.0, entropy="ie"):
     sem_h = sem(enthalpy)
     sem_tds = block_sem(eel) if entropy == "ie" else 0.0
     delta_g = delta_h + minus_tds
-    sem_g = float(np.sqrt(sem_h ** 2 + (sem_tds if np.isfinite(sem_tds) else 0.0) ** 2))
+    if np.isfinite(sem_tds):
+        sem_g = float(np.sqrt(sem_h ** 2 + sem_tds ** 2))
+    else:
+        # Too few frames for a block estimate of the ensemble-level entropy;
+        # report the enthalpy SEM and keep the unknown entropy SEM explicit.
+        sem_g = sem_h
     return {
         "entropy_method": entropy,
         "temperature_k": float(temperature_k),
@@ -117,7 +124,7 @@ def summarize_mmpbsa(path, *, temperature_k=300.0, entropy="ie"):
         "minus_tds_kcal_mol_value": minus_tds,
         "delta_g_kcal_mol": float(delta_g),
         "sem_delta_h_kcal_mol": sem_h,
-        "sem_minus_tds_kcal_mol": sem_tds,
+        "sem_minus_tds_kcal_mol": sem_tds if np.isfinite(sem_tds) else None,
         "sem_delta_g_kcal_mol": sem_g,
         "note": "Single-trajectory MM/PBSA enthalpy plus interaction entropy; an "
                 "approximate end-state estimate, not a calibrated absolute free energy.",

@@ -60,18 +60,18 @@ class MembranePlaneTests(unittest.TestCase):
 
 
 class InteractionEntropyTests(unittest.TestCase):
-    def test_constant_electrostatics_returns_that_energy(self):
-        self.assertAlmostEqual(interaction_entropy([-10.0, -10.0, -10.0], 300.0), -10.0, places=6)
+    def test_constant_electrostatics_has_no_entropy(self):
+        self.assertAlmostEqual(interaction_entropy([-10.0, -10.0, -10.0], 300.0), 0.0, places=9)
 
-    def test_matches_explicit_log_mean_exp(self):
+    def test_matches_explicit_log_mean_exp_minus_mean(self):
         values = np.array([-20.0, -5.0, -8.0, -12.0])
         kt = K_B * 300.0
-        expected = kt * np.log(np.mean(np.exp(values / kt)))
+        expected = kt * np.log(np.mean(np.exp(values / kt))) - values.mean()
         self.assertAlmostEqual(interaction_entropy(values, 300.0), expected, places=6)
 
     def test_entropy_correction_is_unfavourable(self):
         values = np.array([-25.0, -10.0, -3.0])
-        self.assertGreater(interaction_entropy(values, 300.0), values.mean())
+        self.assertGreater(interaction_entropy(values, 300.0), 0.0)
 
 
 class SummarizeMmpbsaTests(unittest.TestCase):
@@ -126,6 +126,41 @@ class WrapComplexTests(unittest.TestCase):
         self.assertTrue(np.all(centroid >= 0.0) and np.all(centroid <= 10.0))
         after = np.linalg.norm(trajectory.xyz[0, 1] - trajectory.xyz[0, 0])
         self.assertAlmostEqual(before, after, places=6)
+
+
+class AtomtypeDeduplicationTests(unittest.TestCase):
+    def test_equivalent_types_are_merged(self):
+        import tempfile
+        from pathlib import Path
+        from prot_lig_runner.topology_export import deduplicate_atomtypes
+
+        top = """
+[ atomtypes ]
+;name  at.num  mass  charge  ptype  sigma  epsilon
+T0       6  12.01  0.0  A  0.3400  0.3600
+T1       6  12.01  0.0  A  0.3400  0.3600
+T2       8  16.00  0.0  A  0.2950  0.8800
+T3       6  12.01  0.0  A  0.3400  0.3600
+
+[ atoms ]
+1  T1  1  LIG  C1  1  0.1  12.01
+2  T2  1  LIG  O1  2 -0.2  16.00
+3  T3  1  LIG  C2  3  0.1  12.01
+
+[ nonbond_params ]
+T0  T2  1  0.30  0.50
+T1  T2  1  0.30  0.50
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "system.top"
+            path.write_text(top)
+            deduplicate_atomtypes(path)
+            text = path.read_text()
+        self.assertNotIn("T1", text)
+        self.assertNotIn("T3", text)
+        self.assertIn("T0", text)
+        self.assertIn("T2", text)
+        self.assertEqual(text.count("T0 T2 1 0.30 0.50"), 1)
 
 
 if __name__ == "__main__":
