@@ -4,12 +4,9 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from prot_lig_runner.analysis import (
-    analyze_snapshot,
-    read_state_data,
-    run_mmpbsa,
-    write_index_file,
-)
+from prot_lig_runner.analysis import analyze_snapshot
+from prot_lig_runner.mmpbsa import run_mmpbsa
+from prot_lig_runner.trajectory import read_state_data, write_index_file
 
 
 class AnalysisTests(unittest.TestCase):
@@ -58,10 +55,15 @@ class AnalysisTests(unittest.TestCase):
                          root / "system_final.pdb", analysis / "trajectory_fitted.xtc"):
                 path.write_text("input")
             full_topology = MagicMock()
-            full_topology.select.return_value = [0, 1]
+            full_topology.select.return_value = [0]
             complex_topology = MagicMock()
             complex_topology.n_atoms = 2
             complex_topology.select.side_effect = [[0], [1]]
+            ligand_residue = MagicMock()
+            ligand_residue.name = "LIG"
+            ligand_residue.atoms = [SimpleNamespace(index=1)]
+            complex_topology.residues = [ligand_residue]
+            selection = {"label": "LIG1", "residue_label": "A:1:LIG", "atoms": [1]}
             complex_chunk = MagicMock()
             complex_chunk.xyz = "coordinates"
             complex_chunk.time = [0.0]
@@ -78,10 +80,12 @@ class AnalysisTests(unittest.TestCase):
                 formats=SimpleNamespace(XTCTrajectoryFile=MagicMock(return_value=writer_context)),
             )
             with patch("prot_lig_runner.analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
-                with patch("prot_lig_runner.analysis.subprocess.run") as run:
+                with patch("prot_lig_runner.mmpbsa.subprocess.run") as run:
                     run.return_value.returncode = 0
                     with patch.dict("sys.modules", {"mdtraj": md}):
-                        result = run_mmpbsa(root, analysis, interval=2)
+                        with patch("prot_lig_runner.mmpbsa.resolve_ligand",
+                                   return_value=selection):
+                            result = run_mmpbsa(root, analysis, interval=2)
             self.assertEqual(result, analysis / "mmpbsa")
             input_text = (result / "mmpbsa.in").read_text()
             self.assertIn("interval=2", input_text)
@@ -98,18 +102,6 @@ class AnalysisTests(unittest.TestCase):
             self.assertEqual(command[command.index("-cg") + 1:command.index("-cg") + 3],
                              ["Protein", "LIG"])
 
-    def test_pb_mem_requires_explicit_membrane_thickness(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            analysis = root / "analysis"
-            analysis.mkdir()
-            for path in (root / "mmpbsa_complex.top", root / "mmpbsa_complex.pdb",
-                         root / "system_final.pdb", analysis / "trajectory_fitted.xtc"):
-                path.write_text("input")
-            with patch("prot_lig_runner.analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
-                with self.assertRaisesRegex(ValueError, "membrane thickness"):
-                    run_mmpbsa(root, analysis, model="pb_mem")
-
     def test_pb_mem_requests_compatible_amber_pb_solver(self):
         import json
 
@@ -125,10 +117,15 @@ class AnalysisTests(unittest.TestCase):
             }))
 
             full_topology = MagicMock()
-            full_topology.select.return_value = [0, 1]
+            full_topology.select.return_value = [0]
             complex_topology = MagicMock()
             complex_topology.n_atoms = 2
             complex_topology.select.side_effect = [[0], [1]]
+            ligand_residue = MagicMock()
+            ligand_residue.name = "LIG"
+            ligand_residue.atoms = [SimpleNamespace(index=1)]
+            complex_topology.residues = [ligand_residue]
+            selection = {"label": "LIG1", "residue_label": "A:1:LIG", "atoms": [1]}
             complex_chunk = MagicMock()
             complex_chunk.xyz = "coordinates"
             complex_chunk.time = [0.0]
@@ -144,12 +141,14 @@ class AnalysisTests(unittest.TestCase):
                 formats=SimpleNamespace(XTCTrajectoryFile=MagicMock(return_value=writer_context)),
             )
             with patch("prot_lig_runner.analysis.shutil.which", return_value="/usr/bin/gmx_MMPBSA"):
-                with patch("prot_lig_runner.analysis.subprocess.run") as run:
+                with patch("prot_lig_runner.mmpbsa.subprocess.run") as run:
                     run.return_value.returncode = 0
                     with patch.dict("sys.modules", {"mdtraj": md}):
-                        result = run_mmpbsa(
-                            root, analysis, model="pb_mem", membrane_thickness_angstrom=30.0
-                        )
+                        with patch("prot_lig_runner.mmpbsa.resolve_ligand",
+                                   return_value=selection):
+                            result = run_mmpbsa(
+                                root, analysis, model="pb_mem", membrane_thickness_angstrom=30.0
+                            )
 
             input_text = (result / "mmpbsa.in").read_text()
             self.assertIn("memopt=1", input_text)

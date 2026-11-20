@@ -3,7 +3,8 @@ channels:
   - conda-forge
 dependencies:
   - python=3.11
-  - openmm=8.2
+  - openmm=8.6.1
+  - rdkit>=2024.3
   - cuda-version=12
   - pdbfixer=1.11
   - openff-toolkit=0.16.5

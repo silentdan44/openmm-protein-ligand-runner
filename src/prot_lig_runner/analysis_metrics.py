@@ -13,10 +13,18 @@ class DistancePairError(ValueError):
     """Invalid explicitly requested residue-distance pair."""
 
 
+def _residue_number(residue):
+    """Residue number on both mdtraj (resSeq) and OpenMM (id) topologies."""
+    value = getattr(residue, "resSeq", None)
+    if value is None:
+        value = getattr(residue, "id", None)
+    return value
+
+
 def _residue_label(residue):
     chain_id = _chain_label(residue.chain)
     insertion = getattr(residue, "insertion_code", "") or ""
-    return f"{chain_id}:{residue.resSeq}{insertion}:{residue.name}"
+    return f"{chain_id}:{_residue_number(residue)}{insertion}:{residue.name}"
 
 
 def _chain_label(chain):
@@ -24,6 +32,78 @@ def _chain_label(chain):
     if value is None and not hasattr(chain, "chain_id"):
         value = getattr(chain, "id", None)
     return str(value) if value not in (None, "") else "_"
+
+
+def _iter_residues(topology):
+    """Iterate residues on both mdtraj (property) and OpenMM (method) topologies."""
+    residues = getattr(topology, "residues", [])
+    return residues() if callable(residues) else residues
+
+
+def _iter_atoms(residue):
+    """Iterate atoms on both mdtraj (property) and OpenMM (method) residues."""
+    atoms = getattr(residue, "atoms", [])
+    return atoms() if callable(atoms) else atoms
+
+
+def ligand_groups(topology):
+    """Describe each ligand residue with a stable 1-based label.
+
+    Ligands are added in --ligand order, so LIG1 is the first SDF passed to the
+    runner. Every LIG residue gets its own label even when two inputs are the
+    same molecule (for example two GABA copies).
+    """
+    groups = []
+    for index, residue in enumerate(
+        (residue for residue in _iter_residues(topology) if residue.name == "LIG"), 1
+    ):
+        heavy = [atom.index for atom in _iter_atoms(residue) if atom.element.symbol != "H"]
+        groups.append(
+            {
+                "label": f"LIG{index}",
+                "residue_label": _residue_label(residue),
+                "residue_index": residue.index,
+                "chain_index": residue.chain.index,
+                "res_seq": _residue_number(residue),
+                "atoms": [atom.index for atom in _iter_atoms(residue)],
+                "heavy_atoms": heavy,
+            }
+        )
+    return groups
+
+
+def resolve_ligand(topology, selector):
+    """Resolve a ligand selector to one entry from ligand_groups().
+
+    Accepts a 1-based index ("2"), the label ("LIG2"), or the residue label
+    printed in the report (for example "A:123:LIG"). With no selector a run
+    that contains exactly one ligand is unambiguous; several ligands must be
+    chosen explicitly.
+    """
+    groups = ligand_groups(topology)
+    if not groups:
+        raise ValueError("The topology contains no LIG residues")
+    if selector is None:
+        if len(groups) == 1:
+            return groups[0]
+        options = ", ".join(f"{group['label']} ({group['residue_label']})" for group in groups)
+        raise ValueError(
+            "The topology contains several ligands; choose one with --mmpbsa-ligand. "
+            f"Available: {options}"
+        )
+    text = str(selector).strip()
+    if text.isdigit():
+        index = int(text)
+        if not 1 <= index <= len(groups):
+            raise ValueError(
+                f"Ligand index {index} is out of range; this run has {len(groups)} ligand(s)"
+            )
+        return groups[index - 1]
+    for group in groups:
+        if text in (group["label"], group["residue_label"]):
+            return group
+    options = ", ".join(f"{group['label']} ({group['residue_label']})" for group in groups)
+    raise ValueError(f"Unknown ligand {selector!r}. Available: {options}")
 
 
 def _write_rows(path, fieldnames, rows):
@@ -162,6 +242,129 @@ def _membrane_timeseries(trajectory, lipid_type, center_z_nm):
     }
 
 
+def _image_to_reference(trajectory):
+    """Put every residue in the periodic image nearest its first-frame position.
+
+    XTC stores each frame as written by the integrator, so a molecule that
+    crosses a periodic boundary appears on the opposite side in the next
+    frame. That produces box-sized jumps in RMSD and contact counts that look
+    like binding/unbinding events.
+
+    Shifting each residue by an integer number of box vectors (chosen so the
+    residue lands in the image nearest its frame-0 position) removes those
+    jumps. Rounding to whole box vectors leaves sub-box motion untouched, so
+    real binding/unbinding is preserved. Residues are imaged as units so a
+    molecule never gets torn across the boundary.
+
+    Do not first shift ligands towards the protein centroid: a membrane protein
+    is comparable in size to the box, so a bound ligand at the periphery can be
+    more than half a box from that centroid and would be moved to the wrong
+    image. Contact and hydrogen-bond distances use the periodic minimum image,
+    which is insensitive to the frame's image.
+    """
+    import numpy as np
+
+    boxes = trajectory.unitcell_vectors
+    if boxes is None or len(trajectory.xyz) < 2:
+        return
+
+    # Residues are contiguous in the topology, so one reduceat per frame chunk
+    # gives every residue centroid without a Python loop over residues.
+    starts = []
+    counts = []
+    for residue in trajectory.topology.residues:
+        starts.append(residue.atom(0).index if hasattr(residue, "atom") else residue.first_atom)
+        counts.append(residue.n_atoms)
+    starts = np.asarray(starts, dtype=np.int64)
+    counts = np.asarray(counts, dtype=np.int64)
+    if starts.size == 0 or starts[0] != 0 or np.any(starts[1:] != starts[:-1] + counts[:-1]):
+        return  # non-contiguous topology: leave coordinates as they are
+
+    xyz = trajectory.xyz
+    chunk = max(1, min(64, xyz.shape[0]))
+    reference = None
+    for begin in range(0, xyz.shape[0], chunk):
+        end = min(begin + chunk, xyz.shape[0])
+        block = xyz[begin:end]
+        centroids = np.add.reduceat(block, starts, axis=1) / counts[None, :, None]
+        if reference is None:
+            reference = centroids[0].copy()
+        for offset in range(end - begin):
+            box = boxes[begin + offset]
+            fractional = (centroids[offset] - reference) @ np.linalg.inv(box)
+            shift = -np.round(fractional) @ box
+            block[offset] += np.repeat(shift, counts, axis=0)
+
+
+def estimate_membrane_planes(topology, xyz, *, center_z_nm=0.0, lipid_type="POPC"):
+    """Estimate bilayer phosphate planes from the built structure.
+
+    Returns median z of the phosphorus atoms in each leaflet (relative to
+    ``center_z_nm``), the plane separation, and the atoms rejected as outliers.
+    A median with a MAD cut is used because a single flipped lipid or a
+    mis-assigned phosphate would move a mean by nanometres and silently change
+    the MMPBSA membrane thickness.
+    """
+    import numpy as np
+
+    names = {lipid_type, lipid_type[:3]}
+    indices, z_values = [], []
+    for residue in _iter_residues(topology):
+        if residue.name not in names:
+            continue
+        for atom in _iter_atoms(residue):
+            if atom.name.strip().upper() == "P":
+                indices.append(atom.index)
+                z_values.append(float(xyz[atom.index, 2]) - float(center_z_nm))
+    if len(indices) < 4:
+        raise ValueError(
+            f"Found {len(indices)} lipid phosphorus atoms; need at least 4 to estimate "
+            "the membrane planes"
+        )
+    z = np.asarray(z_values)
+    lower_mask, upper_mask = z < 0.0, z > 0.0
+    if not lower_mask.any() or not upper_mask.any():
+        raise ValueError("Lipid phosphorus atoms do not populate both membrane leaflets")
+
+    def robust_plane(values):
+        median = float(np.median(values))
+        mad = float(np.median(np.abs(values - median)))
+        scale = 1.4826 * mad
+        if scale > 0:
+            keep = np.abs(values - median) <= 3.0 * scale
+        else:
+            keep = np.ones(len(values), dtype=bool)
+        return float(np.median(values[keep])), keep
+
+    lower_plane, lower_keep = robust_plane(z[lower_mask])
+    upper_plane, upper_keep = robust_plane(z[upper_mask])
+    lower_indices = np.asarray(indices)[lower_mask]
+    upper_indices = np.asarray(indices)[upper_mask]
+    outliers = [
+        {"index": int(index), "z_nm": float(value), "leaflet": "lower"}
+        for index, value, keep in zip(lower_indices, z[lower_mask], lower_keep)
+        if not keep
+    ] + [
+        {"index": int(index), "z_nm": float(value), "leaflet": "upper"}
+        for index, value, keep in zip(upper_indices, z[upper_mask], upper_keep)
+        if not keep
+    ]
+    return {
+        "lipid_type": lipid_type,
+        "center_z_nm": float(center_z_nm),
+        "lower_plane_nm": lower_plane,
+        "upper_plane_nm": upper_plane,
+        "thickness_nm": upper_plane - lower_plane,
+        "thickness_angstrom": 10.0 * (upper_plane - lower_plane),
+        "lower_atom_count": int(lower_keep.sum()),
+        "upper_atom_count": int(upper_keep.sum()),
+        "outlier_count": len(outliers),
+        "outliers": outliers,
+        "atom_indices": [int(index) for index in indices],
+        "atom_z_nm": z.tolist(),
+    }
+
+
 def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, analysis_stride=10,
                        distance_pairs=None):
     import mdtraj as md
@@ -170,6 +373,15 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
     trajectory = md.load(str(trajectory_path), top=str(topology_path), stride=analysis_stride)
     production_start_ps = (config["nvt_steps"] + config["npt_steps"]) * config["timestep_fs"] / 1000.0
     trajectory = trajectory[trajectory.time >= production_start_ps]
+    if trajectory.n_frames == 0 and analysis_stride > 1:
+        # A short production window with a large stride can skip every
+        # production frame; retry without striding before giving up.
+        logger.warning(
+            "Analysis stride %d left no production frames; falling back to every frame",
+            analysis_stride,
+        )
+        trajectory = md.load(str(trajectory_path), top=str(topology_path))
+        trajectory = trajectory[trajectory.time >= production_start_ps]
     if trajectory.n_frames == 0:
         raise ValueError("No production frames were found in trajectory.xtc; increase production length or adjust --xtc-interval")
 
@@ -181,6 +393,7 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
     ligand_all = topology.select("resname LIG")
     if len(protein_atoms) == 0 or len(protein_ca) == 0 or len(ligand_atoms) == 0:
         raise ValueError("Could not identify protein heavy atoms, protein Cα atoms, and LIG atoms in system_final.pdb")
+    groups = [group for group in ligand_groups(topology) if group["heavy_atoms"]]
 
     membrane_core_ca, membrane_selection = [], None
     membrane_data = None
@@ -197,13 +410,10 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
             )
 
     if trajectory.unitcell_vectors is not None:
-        boxes = trajectory.unitcell_vectors
-        for frame in range(trajectory.n_frames):
-            box = boxes[frame]
-            delta = trajectory.xyz[frame, ligand_all].mean(axis=0) - trajectory.xyz[frame, protein_atoms].mean(axis=0)
-            fractional = delta @ np.linalg.inv(box)
-            image_delta = (fractional - np.round(fractional)) @ box
-            trajectory.xyz[frame, ligand_all] += image_delta - delta
+        # RMSD needs a continuous trajectory: a molecule that crosses a
+        # boundary would otherwise jump by a box length between frames and
+        # look like a binding/unbinding event.
+        _image_to_reference(trajectory)
 
     trajectory.superpose(trajectory, 0, atom_indices=protein_ca)
     reference = trajectory[0]
@@ -216,6 +426,12 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
     ligand_rmsd = np.sqrt(np.mean(np.sum(ligand_delta * ligand_delta, axis=2), axis=1))
     protein_rg = md.compute_rg(trajectory.atom_slice(protein_atoms))
     ligand_rg = md.compute_rg(trajectory.atom_slice(ligand_atoms))
+    for group in groups:
+        group_delta = trajectory.xyz[:, group["atoms"]] - reference.xyz[0, group["atoms"]]
+        group["rmsd_nm"] = np.sqrt(np.mean(np.sum(group_delta * group_delta, axis=2), axis=1))
+        group["rg_nm"] = md.compute_rg(trajectory.atom_slice(group["heavy_atoms"]))
+        group["contacts"] = np.zeros(trajectory.n_frames)
+        group["hbonds"] = np.zeros(trajectory.n_frames, dtype=int)
 
     protein_residues = sorted({atom.residue.index for atom in topology.atoms if atom.residue.is_protein})
     ligand_residues = sorted({atom.residue.index for atom in topology.atoms if atom.residue.name == "LIG"})
@@ -224,11 +440,15 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
     contact_rows = []
     if residue_pairs.size:
         distances, actual_pairs = md.compute_contacts(
-            trajectory, contacts=residue_pairs, scheme="closest-heavy", periodic=False
+            trajectory, contacts=residue_pairs, scheme="closest-heavy", periodic=True
         )
         contacts = (distances < 0.45).sum(axis=1)
         for pair_index, (protein_idx, ligand_idx) in enumerate(actual_pairs):
-            occupancy = float(np.mean(distances[:, pair_index] < 0.45))
+            in_contact = distances[:, pair_index] < 0.45
+            for group in groups:
+                if group["residue_index"] == int(ligand_idx):
+                    group["contacts"] += in_contact
+            occupancy = float(np.mean(in_contact))
             if occupancy > 0:
                 contact_rows.append({
                     "protein_residue": _residue_label(topology.residue(int(protein_idx))),
@@ -252,7 +472,7 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
         complex_topology = complex_trajectory.topology
         complex_protein = complex_topology.select("protein")
         complex_ligand = complex_topology.select("resname LIG")
-        candidates = md.baker_hubbard(complex_trajectory, freq=0.0, exclude_water=True, periodic=False)
+        candidates = md.baker_hubbard(complex_trajectory, freq=0.0, exclude_water=True, periodic=True)
         protein_set, ligand_set = set(complex_protein), set(complex_ligand)
         candidates = [tuple(map(int, triplet)) for triplet in candidates
                       if (triplet[0] in protein_set and triplet[2] in ligand_set)
@@ -260,8 +480,8 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
         if candidates:
             triplets = np.asarray(candidates, dtype=int)
             donor_acceptor_pairs = triplets[:, [1, 2]]
-            distances = md.compute_distances(complex_trajectory, donor_acceptor_pairs, periodic=False)
-            angles = md.compute_angles(complex_trajectory, triplets, periodic=False)
+            distances = md.compute_distances(complex_trajectory, donor_acceptor_pairs, periodic=True)
+            angles = md.compute_angles(complex_trajectory, triplets, periodic=True)
             present = (distances < 0.25) & (angles > np.deg2rad(120.0))
             hbonds_per_frame = present.sum(axis=1)
             for index, triplet in enumerate(candidates):
@@ -269,17 +489,22 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
                 acceptor = complex_topology.atom(triplet[2])
                 protein_atom = donor if donor.residue.name != "LIG" else acceptor
                 ligand_atom = acceptor if acceptor.residue.name == "LIG" else donor
+                for group in groups:
+                    if (ligand_atom.residue.chain.index == group["chain_index"]
+                            and ligand_atom.residue.resSeq == group["res_seq"]):
+                        group["hbonds"] += present[:, index]
                 hbond_rows.append({
                     "protein_residue": _residue_label(protein_atom.residue),
                     "protein_atom": protein_atom.name,
+                    "ligand_residue": _residue_label(ligand_atom.residue),
                     "ligand_atom": ligand_atom.name,
                     "occupancy": float(np.mean(present[:, index])),
                     "mean_donor_acceptor_distance_nm": float(np.mean(distances[:, index])),
                 })
             hbond_rows.sort(key=lambda row: row["occupancy"], reverse=True)
             _write_rows(Path(analysis_dir) / "protein_ligand_hbonds.csv",
-                        ["protein_residue", "protein_atom", "ligand_atom", "occupancy",
-                         "mean_donor_acceptor_distance_nm"], hbond_rows)
+                        ["protein_residue", "protein_atom", "ligand_residue", "ligand_atom",
+                         "occupancy", "mean_donor_acceptor_distance_nm"], hbond_rows)
     except Exception as error:
         # Hydrogen-bond analysis is optional and must not suppress other plots.
         hbond_rows = []
@@ -349,11 +574,16 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
                 row[key] = float(values[index]) if values.dtype.kind == "f" else int(values[index])
         for label, values in distance_series.items():
             row[f"distance_nm:{label}"] = float(values[index])
+        for group in groups:
+            row[f"ligand_rmsd_nm:{group['label']}"] = float(group["rmsd_nm"][index])
+            row[f"ligand_rg_nm:{group['label']}"] = float(group["rg_nm"][index])
+            row[f"ligand_contacts:{group['label']}"] = int(group["contacts"][index])
+            row[f"protein_ligand_hbonds:{group['label']}"] = int(group["hbonds"][index])
         trajectory_rows.append(row)
     if trajectory_rows:
         _write_rows(Path(analysis_dir) / "time_series.csv", list(trajectory_rows[0]), trajectory_rows)
 
-    statistics = {
+    statistics: dict = {
         "protein_backbone_rmsd_nm_mean": float(np.mean(protein_rmsd)),
         "protein_backbone_rmsd_nm_std": float(np.std(protein_rmsd)),
         "ligand_rmsd_nm_mean": float(np.mean(ligand_rmsd)),
@@ -368,6 +598,17 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
     if membrane_data:
         statistics["membrane_thickness_nm_mean"] = float(np.nanmean(membrane_data["membrane_thickness_nm"]))
         statistics["membrane_area_per_lipid_nm2_mean"] = float(np.nanmean(membrane_data["membrane_area_per_lipid_nm2"]))
+    statistics["ligands"] = {
+        group["label"]: {
+            "residue": group["residue_label"],
+            "ligand_rmsd_nm_mean": float(np.mean(group["rmsd_nm"])),
+            "ligand_rmsd_nm_std": float(np.std(group["rmsd_nm"])),
+            "ligand_rg_nm_mean": float(np.mean(group["rg_nm"])),
+            "ligand_contacts_mean": float(np.mean(group["contacts"])),
+            "protein_ligand_hbonds_mean": float(np.mean(group["hbonds"])),
+        }
+        for group in groups
+    }
 
     return {
         "time_ns": time_ns,
@@ -377,6 +618,17 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
         "ligand_rmsd_nm": ligand_rmsd,
         "protein_rg_nm": protein_rg,
         "ligand_rg_nm": ligand_rg,
+        "ligands": [
+            {
+                "label": group["label"],
+                "residue": group["residue_label"],
+                "rmsd_nm": group["rmsd_nm"],
+                "rg_nm": group["rg_nm"],
+                "contacts": group["contacts"],
+                "hbonds": group["hbonds"],
+            }
+            for group in groups
+        ],
         "protein_rmsf_nm": rmsf_values,
         "rmsf_residue": rmsf_residue,
         "rmsf_by_chain": rmsf_by_chain,

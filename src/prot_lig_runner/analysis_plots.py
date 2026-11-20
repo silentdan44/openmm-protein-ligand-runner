@@ -12,8 +12,10 @@ logger = logging.getLogger(__name__)
 
 PLOT_FILES = (
     "simulation_qc.png", "protein_stability.png", "protein_rmsf.png", "ligand_pocket.png",
-    "contact_occupancy.png", "hydrogen_bond_occupancy.png", "membrane_integrity.png",
+    "contact_occupancy.png", "hydrogen_bond_occupancy.png", "ligand_interactions.png",
+    "membrane_integrity.png",
     "residue_distances.png", "mmpbsa_energy_terms.png", "mmpbsa_energy_summary.png",
+    "mmpbsa_entropy.png", "mmpbsa_decomposition.png",
     "mmpbsa_residue_decomposition.png",
     # Remove these pre-report plots when regenerating an analysis directory.
     "diagnostics.png", "temperature.png", "potential_energy.png", "kinetic_energy.png",
@@ -28,15 +30,15 @@ def _save_optional_plot(path, name, draw):
     path = Path(path)
     target = path / name
     try:
-        import matplotlib
+        from .report.style import apply_style
 
-        matplotlib.use("Agg")
+        apply_style()
         import matplotlib.pyplot as plt
 
         fig = draw(plt)
         if fig is None:
             return False
-        fig.savefig(target, dpi=200, bbox_inches="tight")
+        fig.savefig(target, dpi=450)
         plt.close(fig)
         return True
     except Exception as error:
@@ -52,7 +54,9 @@ def _save_optional_plot(path, name, draw):
 
 
 def _axis(ax, title, ylabel, xlabel="Time (ns)"):
-    ax.set(title=title, ylabel=ylabel, xlabel=xlabel)
+    # Titles are deliberately ignored: the caption carries the title, per the
+    # figure style used across the report.
+    ax.set(ylabel=ylabel, xlabel=xlabel)
     ax.spines[["top", "right"]].set_visible(False)
 
 
@@ -98,12 +102,16 @@ def _plot_distributions(ax, series, labels, *, colors=None, bins="auto"):
 
 
 def _plot_qc(output_dir, state_rows, config):
+    """QC across every stage: NVT and NPT equilibration plus production."""
     if not state_rows:
         return False
     import numpy as np
 
+    from .report.style import PALETTE, smooth_with_spread
+
     def draw(plt):
         keys = list(state_rows[0])
+
         def column(part):
             key = next((candidate for candidate in keys if part.lower() in candidate.lower()), None)
             return np.asarray([row.get(key, math.nan) for row in state_rows], dtype=float) if key else None
@@ -112,31 +120,57 @@ def _plot_qc(output_dir, state_rows, config):
         if steps is None:
             return None
         time_ns = steps * float(config["timestep_fs"]) / 1_000_000.0
-        fig, axes = plt.subplots(2, 2, figsize=(12, 8), constrained_layout=True)
-        temperature = column("Temperature")
-        if temperature is not None:
-            axes[0, 0].plot(time_ns, temperature, color="#2563eb", linewidth=1)
-            axes[0, 0].axhline(config["temperature_k"], color="#dc2626", linestyle="--", linewidth=1)
-        _axis(axes[0, 0], "Temperature", "K")
+        nvt_steps = float(config["nvt_steps"])
+        npt_steps = float(config["npt_steps"])
+        nvt_end = nvt_steps * float(config["timestep_fs"]) / 1_000_000.0
+        npt_end = (nvt_steps + npt_steps) * float(config["timestep_fs"]) / 1_000_000.0
 
-        energy = column("Potential Energy")
-        if energy is not None:
-            axes[0, 1].plot(time_ns, energy, color="#7c3aed", linewidth=1)
-        _axis(axes[0, 1], "Potential energy", "kJ/mol")
+        # Keep all stages; drop only frames that sit on a restart seam, where a
+        # concatenated legacy trajectory jumps between systems.
+        total_steps = nvt_steps + npt_steps + float(config.get("prod_steps") or 0)
+        keep = np.isfinite(steps)
+        if total_steps > 0:
+            keep &= steps <= total_steps + 1
+        volume_all = column("Box Volume")
+        if volume_all is not None and volume_all.size == steps.size:
+            change = np.abs(np.diff(volume_all, prepend=volume_all[0])) / np.maximum(volume_all, 1e-9)
+            keep &= change < 0.02
+        window = max(3, min(101, int(np.count_nonzero(keep)) // 40 or 3))
 
-        npt = (steps > config["nvt_steps"]) & (steps <= config["nvt_steps"] + config["npt_steps"])
-        density, volume = column("Density"), column("Box Volume")
-        if not np.any(npt):
-            axes[1, 0].text(0.5, 0.5, "No NPT samples", ha="center", va="center",
-                            transform=axes[1, 0].transAxes)
-            axes[1, 1].text(0.5, 0.5, "No NPT samples", ha="center", va="center",
-                            transform=axes[1, 1].transAxes)
-        if density is not None and np.any(npt):
-            axes[1, 0].plot(time_ns[npt], density[npt], color="#059669", linewidth=1)
-        _axis(axes[1, 0], "NPT density", "g/mL")
-        if volume is not None and np.any(npt):
-            axes[1, 1].plot(time_ns[npt], volume[npt], color="#ea580c", linewidth=1)
-        _axis(axes[1, 1], "NPT box volume", "nm³")
+        fig, axes = plt.subplots(2, 2, figsize=(183 / 25.4, 110 / 25.4), constrained_layout=True)
+        series = {
+            "temperature": (column("Temperature"), PALETTE[0], "Temperature (K)"),
+            "energy": (column("Potential Energy"), PALETTE[1], "Potential energy (kJ mol$^{-1}$)"),
+            "volume": (column("Box Volume"), PALETTE[2], "Box volume (nm$^3$)"),
+            "density": (column("Density"), PALETTE[3], "Density (g cm$^{-3}$)"),
+        }
+        for ax, (letter, (key, (values, colour, ylabel))) in zip(
+            axes.ravel(), zip("abcd", series.items())
+        ):
+            if values is not None:
+                smooth_with_spread(ax, time_ns[keep], values[keep], window=window,
+                                   colour=colour, label=key)
+                if key == "temperature":
+                    ax.axhline(config["temperature_k"], color="black", linestyle="--",
+                               linewidth=0.6, label="target")
+                ax.legend()
+            if nvt_end:
+                ax.axvspan(time_ns[0], min(nvt_end, time_ns[-1]), color="0.85", alpha=0.5,
+                           linewidth=0, zorder=0)
+            if npt_end > nvt_end:
+                ax.axvspan(max(nvt_end, time_ns[0]), time_ns[-1],
+                           color="0.93", alpha=0.6, linewidth=0, zorder=0)
+            _axis(ax, "", ylabel)
+            ax.set_xlabel("Time (ns)")
+            ax.text(-0.16, 1.04, letter, transform=ax.transAxes, fontsize=8, weight="bold",
+                    va="bottom", ha="left")
+        if nvt_end:
+            axes[0, 0].text(min(nvt_end, time_ns[-1]) * 0.5, 0.03, "NVT",
+                            transform=axes[0, 0].get_xaxis_transform(), fontsize=6,
+                            ha="center", color="0.35")
+            axes[0, 0].text((nvt_end + time_ns[-1]) * 0.5, 0.03, "NPT / production",
+                            transform=axes[0, 0].get_xaxis_transform(), fontsize=6,
+                            ha="center", color="0.35")
         return fig
 
     return _save_optional_plot(output_dir, "simulation_qc.png", draw)
@@ -152,7 +186,7 @@ def _plot_trajectory(output_dir, data):
 
     def stability(plt):
         fig, axes = plt.subplots(2 if data.get("membrane_core_rmsd_nm") is not None else 1,
-                                 1, figsize=(10, 7 if data.get("membrane_core_rmsd_nm") is not None else 4.5),
+                                 1, figsize=(183 / 25.4, 110 / 25.4 if data.get("membrane_core_rmsd_nm") is not None else 70 / 25.4),
                                  squeeze=False, constrained_layout=True)
         axes = axes[:, 0]
         axes[0].plot(time, data["protein_rmsd_nm"], color="#2563eb", linewidth=1)
@@ -166,7 +200,7 @@ def _plot_trajectory(output_dir, data):
         chains = data.get("rmsf_by_chain", {})
         if not chains:
             return None
-        fig, ax = plt.subplots(figsize=(11, 4.5), constrained_layout=True)
+        fig, ax = plt.subplots(figsize=(183 / 25.4, 75 / 25.4), constrained_layout=True)
         for chain_id, chain_data in chains.items():
             ax.plot(chain_data["residue"], chain_data["rmsf_nm"], linewidth=1, label=f"Chain {chain_id}")
         if len(chains) > 1:
@@ -175,7 +209,7 @@ def _plot_trajectory(output_dir, data):
         return fig
 
     def ligand(plt):
-        fig, axes = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True)
+        fig, axes = plt.subplots(2, 1, figsize=(183 / 25.4, 110 / 25.4), constrained_layout=True)
         axes[0].plot(time, data["ligand_rmsd_nm"], color="#dc2626", linewidth=1)
         _axis(axes[0], "Ligand RMSD after protein alignment", "nm")
         axes[1].plot(time, data["ligand_contacts"], color="#c2410c", linewidth=1,
@@ -186,49 +220,129 @@ def _plot_trajectory(output_dir, data):
         _axis(axes[1], "Ligand pocket contacts", "Count")
         return fig
 
+    def ligand_single(ligand_data):
+        def draw(plt):
+            label = ligand_data["label"]
+            fig, axes = plt.subplots(2, 1, figsize=(183 / 25.4, 110 / 25.4), constrained_layout=True)
+            axes[0].plot(time, ligand_data["rmsd_nm"], color="#dc2626", linewidth=1,
+                         label="vs first production frame")
+            axes[0].legend(frameon=False, fontsize=8)
+            _axis(axes[0], f"{label} ({ligand_data['residue']}) RMSD after protein alignment", "nm")
+            axes[1].plot(time, ligand_data["contacts"], color="#c2410c", linewidth=1,
+                         label="Protein residues within 0.45 nm")
+            axes[1].plot(time, ligand_data["hbonds"], color="#7c3aed", linewidth=1,
+                         label="Hydrogen bonds")
+            axes[1].legend(frameon=False)
+            _axis(axes[1], f"{label} pocket contacts", "Count")
+            return fig
+        return draw
+
+    def ligand_comparison(ligands):
+        def draw(plt):
+            fig, axes = plt.subplots(2, 1, figsize=(183 / 25.4, 110 / 25.4), constrained_layout=True)
+            colors = ["#dc2626", "#2563eb", "#059669", "#d97706", "#7c3aed", "#0891b2"]
+            for index, ligand_data in enumerate(ligands):
+                color = colors[index % len(colors)]
+                axes[0].plot(time, ligand_data["rmsd_nm"], color=color, linewidth=1,
+                             label=ligand_data["label"])
+                axes[1].plot(time, ligand_data["contacts"], color=color, linewidth=1,
+                             label=ligand_data["label"])
+            axes[0].legend(frameon=False)
+            _axis(axes[0], "Ligand RMSD after protein alignment", "nm")
+            axes[1].legend(frameon=False)
+            _axis(axes[1], "Protein residues within 0.45 nm of each ligand", "Count")
+            return fig
+        return draw
+
     for name, draw in (("protein_stability.png", stability),
                        ("protein_rmsf.png", rmsf), ("ligand_pocket.png", ligand)):
         if _save_optional_plot(output_dir, name, draw):
             generated.append(name)
 
-    contacts = data.get("contact_occupancy", [])
-    if contacts:
-        def contact_plot(plt):
-            rows = contacts[:20][::-1]
-            fig, ax = plt.subplots(figsize=(10, max(4, len(rows) * 0.28)), constrained_layout=True)
-            labels = [row["protein_residue"] for row in rows]
-            ax.barh(labels, [row["occupancy"] for row in rows], color="#0f766e")
-            ax.set_xlim(0, 1)
-            _axis(ax, "Protein–ligand contact occupancy (top 20)", "Fraction of frames", "Residue")
-            return fig
-        if _save_optional_plot(output_dir, "contact_occupancy.png", contact_plot):
-            generated.append("contact_occupancy.png")
+    ligands = data.get("ligands", [])
+    for ligand_data in ligands:
+        name = f"ligand_pocket_{ligand_data['label']}.png"
+        if _save_optional_plot(output_dir, name, ligand_single(ligand_data)):
+            generated.append(name)
+    if len(ligands) > 1:
+        if _save_optional_plot(output_dir, "ligand_comparison.png", ligand_comparison(ligands)):
+            generated.append("ligand_comparison.png")
 
+    contacts = data.get("contact_occupancy", [])
     hbonds = data.get("hbond_occupancy", [])
-    if hbonds:
-        def hbond_plot(plt):
-            rows = hbonds[:20][::-1]
-            labels = [f'{row["protein_residue"]} {row["protein_atom"]}–{row["ligand_atom"]}' for row in rows]
-            fig, ax = plt.subplots(figsize=(10, max(4, len(rows) * 0.3)), constrained_layout=True)
-            ax.barh(labels, [row["occupancy"] for row in rows], color="#7c3aed")
-            ax.set_xlim(0, 1)
-            _axis(ax, "Protein–ligand hydrogen-bond occupancy", "Fraction of frames", "Interaction")
+    ligand_names = {ligand.get("residue") or ligand.get("residue_label"): ligand.get("label")
+                    for ligand in data.get("ligands", [])}
+    if contacts or hbonds:
+        def interactions_plot(plt):
+            from .report.style import PALETTE
+
+            fig, axes = plt.subplots(1, 2, figsize=(183 / 25.4, 95 / 25.4),
+                                     constrained_layout=True)
+            for ax, letter, rows, colour_count, kind in (
+                (axes[0], "a", contacts, 10, "contacts"),
+                (axes[1], "b", hbonds, 8, "hydrogen bonds"),
+            ):
+                if not rows:
+                    ax.axis("off")
+                    continue
+                grouped = {}
+                for row in rows:
+                    grouped.setdefault(row.get("ligand_residue"), []).append(row)
+                labels, values, colours = [], [], []
+                for index, (residue, group) in enumerate(grouped.items()):
+                    top = sorted(group, key=lambda item: item["occupancy"], reverse=True)[:colour_count]
+                    for item in top:
+                        if kind == "contacts":
+                            label = item["protein_residue"]
+                        else:
+                            label = f'{item["protein_residue"]} {item["protein_atom"]}–{item["ligand_atom"]}'
+                        labels.append(f"{label} [{ligand_names.get(residue, residue)}]")
+                        values.append(item["occupancy"])
+                        colours.append(PALETTE[index % len(PALETTE)])
+                order = sorted(range(len(values)), key=lambda i: values[i])
+                labels = [labels[i] for i in order]
+                values = [values[i] for i in order]
+                colours = [colours[i] for i in order]
+                ax.barh(labels, values, color=colours)
+                ax.set_xlim(0, 1)
+                _axis(ax, "", "Interaction", "Fraction of frames")
+                ax.tick_params(axis="y", labelsize=6)
+                ax.text(-0.22, 1.02, letter, transform=ax.transAxes, fontsize=8,
+                        weight="bold", va="bottom", ha="left")
+                handles = [plt.Rectangle((0, 0), 1, 1, color=PALETTE[i % len(PALETTE)])
+                           for i in range(len(grouped))]
+                names = [ligand_names.get(residue, residue) for residue in grouped]
+                ax.legend(handles, names, loc="lower right")
             return fig
-        if _save_optional_plot(output_dir, "hydrogen_bond_occupancy.png", hbond_plot):
-            generated.append("hydrogen_bond_occupancy.png")
+        if _save_optional_plot(output_dir, "ligand_interactions.png", interactions_plot):
+            generated.append("ligand_interactions.png")
 
     membrane = data.get("membrane_metrics")
     if membrane:
         def membrane_plot(plt):
-            fig, axes = plt.subplots(3, 1, figsize=(10, 9), constrained_layout=True)
-            axes[0].plot(time, membrane["membrane_area_per_lipid_nm2"], color="#2563eb", linewidth=1)
-            _axis(axes[0], "Area per lipid", "nm²")
-            axes[1].plot(time, membrane["membrane_thickness_nm"], color="#059669", linewidth=1)
-            _axis(axes[1], "Bilayer thickness (phosphate-plane separation)", "nm")
-            axes[2].plot(time, membrane["membrane_lower_lipid_count"], label="Lower leaflet", linewidth=1)
-            axes[2].plot(time, membrane["membrane_upper_lipid_count"], label="Upper leaflet", linewidth=1)
-            axes[2].legend(frameon=False)
-            _axis(axes[2], "Leaflet lipid counts", "Lipids")
+            import numpy as np
+
+            from .report.style import PALETTE, smooth_with_spread
+
+            fig, axes = plt.subplots(2, 1, figsize=(136 / 25.4, 100 / 25.4),
+                                     constrained_layout=True, sharex=True)
+            window = max(3, min(51, len(time) // 25 or 3))
+            smooth_with_spread(axes[0], time, membrane["membrane_area_per_lipid_nm2"],
+                               window=window, colour=PALETTE[0], label="area per lipid", raw=False)
+            _axis(axes[0], "", "Area per lipid (nm$^2$)")
+            smooth_with_spread(axes[1], time, membrane["membrane_thickness_nm"],
+                               window=window, colour=PALETTE[2], label="thickness", raw=False)
+            _axis(axes[1], "", "Thickness (nm)")
+            lower = np.asarray(membrane["membrane_lower_lipid_count"], dtype=float)
+            upper = np.asarray(membrane["membrane_upper_lipid_count"], dtype=float)
+            axes[1].text(0.01, 0.04,
+                         f"{int(np.nanmedian(lower))} / {int(np.nanmedian(upper))} lipids "
+                         "per leaflet (constant)",
+                         transform=axes[1].transAxes, fontsize=7, color="0.35")
+            for letter, ax in zip("ab", axes):
+                ax.text(-0.12, 1.05, letter, transform=ax.transAxes, fontsize=8,
+                        weight="bold", va="bottom", ha="left")
+            axes[1].set_xlabel("Time (ns)")
             return fig
         if _save_optional_plot(output_dir, "membrane_integrity.png", membrane_plot):
             generated.append("membrane_integrity.png")
@@ -239,7 +353,7 @@ def _plot_trajectory(output_dir, data):
             labels = list(distances)
             series = [distances[label] for label in labels]
             fig, (ax, dist_ax) = plt.subplots(
-                1, 2, figsize=(12, 5), sharey=True, constrained_layout=True,
+                1, 2, figsize=(183 / 25.4, 80 / 25.4), sharey=True, constrained_layout=True,
                 gridspec_kw={"width_ratios": [4, 1]},
             )
             colors = []
@@ -305,7 +419,7 @@ def _plot_mmpbsa(output_dir, mmpbsa_csv, decomposition_csv=None):
         labels = energy_keys
         series = [[row[key] for row in rows] for key in labels]
         fig, (ax, dist_ax) = plt.subplots(
-            1, 2, figsize=(13, 5.5), sharey=True, constrained_layout=True,
+            1, 2, figsize=(183 / 25.4, 88 / 25.4), sharey=True, constrained_layout=True,
             gridspec_kw={"width_ratios": [4, 1]},
         )
         colors = []
@@ -325,7 +439,7 @@ def _plot_mmpbsa(output_dir, mmpbsa_csv, decomposition_csv=None):
         values = [[row[key] for row in rows] for key in energy_keys]
         means = [float(np.mean(series)) for series in values]
         deviations = [float(np.std(series, ddof=1)) if len(series) > 1 else 0.0 for series in values]
-        fig, ax = plt.subplots(figsize=(10, 5), constrained_layout=True)
+        fig, ax = plt.subplots(figsize=(183 / 25.4, 80 / 25.4), constrained_layout=True)
         positions = np.arange(len(energy_keys))
         ax.errorbar(positions, means, yerr=deviations, fmt="o", capsize=4, color="#1d4ed8")
         ax.axhline(0, color="#64748b", linewidth=0.8)
@@ -353,7 +467,7 @@ def _plot_mmpbsa(output_dir, mmpbsa_csv, decomposition_csv=None):
             if ranked:
                 def residue_decomposition(plt):
                     rows_plot = ranked[::-1]
-                    fig, ax = plt.subplots(figsize=(10, max(4, len(rows_plot) * 0.3)), constrained_layout=True)
+                    fig, ax = plt.subplots(figsize=(183 / 25.4, max(50, len(rows_plot) * 4.5) / 25.4), constrained_layout=True)
                     y = np.arange(len(rows_plot))
                     ax.barh(y, [row[1] for row in rows_plot], color=["#dc2626" if row[1] > 0 else "#0f766e" for row in rows_plot])
                     ax.errorbar([row[1] for row in rows_plot], y, xerr=[row[2] for row in rows_plot],
@@ -406,30 +520,138 @@ def _read_decomposition(path):
     return result or None
 
 
-def build_report(output_dir, metrics, generated_plots, *, warnings=None):
-    output_dir = Path(output_dir)
-    summary_items = "".join(
-        f"<li><strong>{html.escape(key.replace('_', ' '))}:</strong> {value:.3f}</li>"
-        for key, value in metrics.get("trajectory_metrics", {}).items()
-    )
-    notes = "".join(f"<li>{html.escape(note)}</li>" for note in (warnings or []))
-    links = "\n".join(
-        f'<section><h2>{html.escape(Path(name).stem.replace("_", " ").title())}</h2>'
-        f'<p><img src="{html.escape(name)}" alt="{html.escape(name)}" style="max-width:100%"></p></section>'
-        for name in generated_plots
-    )
-    report = "".join((
-        "<!doctype html><meta charset='utf-8'><title>MD analysis report</title>",
-        "<style>body{font:16px system-ui;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#172033}"
-        "img{border:1px solid #dbe2ea;border-radius:8px;max-width:100%}section{margin:2rem 0}</style>",
-        "<h1>Protein–ligand MD analysis</h1>",
-        "<p><strong>PRELIMINARY REPORT</strong> — simulation is ongoing; results may change.</p>"
-        if metrics.get("preliminary") else "",
-        f"<p>Production frames analyzed: {metrics.get('frame_count', 0)}; "
-        f"state samples: {metrics.get('state_sample_count', 0)}.</p>",
-        f"<ul>{summary_items}</ul>" if summary_items else "",
-        "<p>Frame-to-frame spread is descriptive; frames are correlated and do not replace independent replicas.</p>",
-        f"<h2>Analysis notes</h2><ul>{notes}</ul>" if notes else "",
-        links if links else "<p>No optional plots were available for this run.</p>",
-    ))
-    (output_dir / "report.html").write_text(report)
+def plot_membrane_planes(output_dir, estimate, *, filename="membrane_planes.png"):
+    """Draw the phosphorus z distribution used to pick the membrane planes."""
+
+    def draw(plt):
+        import numpy as np
+
+        z = np.asarray(estimate["atom_z_nm"], dtype=float)
+        index = np.asarray(estimate["atom_indices"], dtype=int)
+        outliers = {item["index"] for item in estimate.get("outliers", [])}
+        keep = np.array([idx not in outliers for idx in index])
+        fig, axes = plt.subplots(2, 1, figsize=(183 / 25.4, 110 / 25.4), constrained_layout=True)
+        axes[0].scatter(index[keep], z[keep], s=6, color="#2563eb", label="phosphorus atoms")
+        if (~keep).any():
+            axes[0].scatter(index[~keep], z[~keep], s=18, color="#dc2626", marker="x",
+                            label="outliers (rejected)")
+        axes[0].axhline(estimate["lower_plane_nm"], color="#0f766e", linestyle="--", linewidth=1)
+        axes[0].axhline(estimate["upper_plane_nm"], color="#0f766e", linestyle="--", linewidth=1)
+        axes[0].annotate(
+            f"thickness {estimate['thickness_angstrom']:.1f} A",
+            xy=(index.min(), 0.0), xytext=(index.min(), (estimate["upper_plane_nm"] + estimate["lower_plane_nm"]) / 2),
+            color="#0f766e",
+        )
+        axes[0].legend(frameon=False, fontsize=8)
+        _axis(axes[0], f"Membrane phosphate planes ({estimate['lipid_type']})",
+              "z - membrane center (nm)", "Phosphorus atom index")
+
+        bins = max(10, min(60, len(z) // 4))
+        axes[1].hist(z, bins=bins, color="#93c5fd", edgecolor="white")
+        axes[1].axvline(estimate["lower_plane_nm"], color="#0f766e", linestyle="--", linewidth=1)
+        axes[1].axvline(estimate["upper_plane_nm"], color="#0f766e", linestyle="--", linewidth=1)
+        _axis(axes[1], "Phosphorus z distribution", "Count", "z - membrane center (nm)")
+        return fig
+
+    return _save_optional_plot(output_dir, filename, draw)
+
+
+def _plot_mmpbsa_entropy(output_dir, summary):
+    """Plot running enthalpy/entropy/free-energy estimates from MMPBSA frames."""
+
+    def draw(plt):
+        import numpy as np
+
+        frames = np.asarray(summary["frames"], dtype=float)
+        delta_h = np.asarray(summary["delta_h_kcal_mol"], dtype=float)
+        delta_g = np.asarray(summary["delta_g_running_kcal_mol"], dtype=float)
+        variants = summary.get("entropy_variants") or {
+            "ie": {"name": "ie", "minus_tds_running_kcal_mol": summary["minus_tds_kcal_mol"]}
+        }
+        colours = {"ie": "#dc2626", "c2": "#b45309"}
+        fig, axes = plt.subplots(2, 1, figsize=(183 / 25.4, 110 / 25.4), constrained_layout=True)
+        axes[0].plot(frames, delta_h, color="#2563eb", linewidth=1, label="ΔH (MM/PBSA)")
+        for method, variant in variants.items():
+            axes[0].plot(frames, np.asarray(variant["minus_tds_running_kcal_mol"], dtype=float),
+                         color=colours.get(method, "#7c3aed"), linewidth=1,
+                         label=f"−TΔS ({method.upper()})")
+        axes[0].plot(frames, delta_g, color="#0f766e", linewidth=1.5, label="ΔG estimate")
+        axes[0].legend(frameon=False, fontsize=8)
+        _axis(axes[0], "Running MMPBSA estimates", "kcal/mol", "Frame")
+        axes[1].hist(
+            np.asarray(summary["delta_eel_kcal_mol"], dtype=float),
+            bins=max(5, min(40, len(frames))), color="#c4b5fd", edgecolor="white",
+        )
+        _axis(axes[1], "Per-frame electrostatic interaction energy", "Count", "ΔEEL (kcal/mol)")
+        return fig
+
+    return _save_optional_plot(output_dir, "mmpbsa_entropy.png", draw)
+
+
+def _plot_mmpbsa_decomposition(output_dir, summary, mmpbsa_csv,
+                               filename="mmpbsa_decomposition.png"):
+    """One figure: per-frame Gibbs decomposition and the final ΔG."""
+    try:
+        rows = read_mmpbsa_delta_csv(mmpbsa_csv)
+    except Exception as error:
+        logger.warning("Skipping MMPBSA decomposition plot: %s", error)
+        return []
+    if not rows:
+        return []
+    import numpy as np
+
+    frame_key = next(key for key in rows[0] if key.lower().startswith("frame"))
+    frames = np.arange(1, len(rows) + 1)
+    terms = {}
+    for key in ("VDWAALS", "EEL", "EGB", "EPB", "ESURF"):
+        if key in rows[0]:
+            terms[key] = np.asarray([row[key] for row in rows], dtype=float)
+    total = np.asarray([row["TOTAL"] for row in rows], dtype=float) if "TOTAL" in rows[0] else None
+
+    def draw(plt):
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True,
+                                 gridspec_kw={"width_ratios": [1.6, 1]})
+        colours = {"EEL": "#2563eb", "VDWAALS": "#0f766e", "EGB": "#b45309",
+                   "EPB": "#b45309", "ESURF": "#7c3aed"}
+        for name, values in terms.items():
+            axes[0].plot(frames, values, linewidth=1, color=colours[name], label=name)
+        if total is not None:
+            axes[0].plot(frames, total, color="black", linewidth=1.6, label="ΔH (total)")
+        if summary:
+            variants = summary.get("entropy_variants") or {}
+            primary = next(iter(variants.values()), None)
+            if primary:
+                axes[0].axhline(primary["delta_g_kcal_mol"], color="#dc2626",
+                                linestyle="--", linewidth=1.2, label="ΔG (with entropy)")
+        axes[0].legend(frameon=False, fontsize=8, ncol=2)
+        _axis(axes[0], "", "kcal/mol", "MMPBSA frame")
+        axes[0].text(-0.12, 1.02, "a", transform=axes[0].transAxes, fontsize=14, va="bottom")
+
+        labels, values = [], []
+        for name in ("EEL", "VDWAALS", "EGB", "EPB", "ESURF"):
+            if name in terms:
+                labels.append(name)
+                values.append(float(terms[name].mean()))
+        if summary and summary.get("delta_h_mean_kcal_mol") is not None:
+            labels.append("ΔH")
+            values.append(float(summary["delta_h_mean_kcal_mol"]))
+            variants = summary.get("entropy_variants") or {}
+            primary = next(iter(variants.values()), None)
+            if primary:
+                labels += ["−TΔS", "ΔG"]
+                values += [float(primary["minus_tds_kcal_mol"]),
+                           float(primary["delta_g_kcal_mol"])]
+        positions = np.arange(len(labels))
+        bar_colours = ["#2563eb" if value < 0 else "#dc2626" for value in values]
+        axes[1].barh(positions, values, color=bar_colours, height=0.62)
+        axes[1].set_yticks(positions, labels)
+        axes[1].axvline(0.0, color="0.3", linewidth=0.8)
+        axes[1].invert_yaxis()
+        _axis(axes[1], "", "kcal/mol", "")
+        axes[1].set_xlabel("kcal/mol")
+        axes[1].set_ylabel("")
+        axes[1].text(-0.28, 1.02, "b", transform=axes[1].transAxes, fontsize=14, va="bottom")
+        return fig
+
+    saved = _save_optional_plot(output_dir, filename, draw)
+    return [filename] if saved else []

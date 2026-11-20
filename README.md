@@ -66,7 +66,9 @@ For a larger TRPV4 run, replace the two fixture paths with `trpv4_receptor.pdb` 
 
 ## Inputs and membrane orientation
 
-Mount custom receptor and ligand files read-only, then pass their container paths with `--receptor` and `--ligand`. Repeat `--ligand` once per molecule to simulate a shared protein complex containing several ligands. Each SDF must contain exactly one molecule with a 3D conformer in the receptor's coordinate frame. All ligands are parameterized and receive the same staged restraint schedule; ligand interaction metrics in the report aggregate across them.
+Mount custom receptor and ligand files read-only, then pass their container paths with `--receptor` and `--ligand`. Repeat `--ligand` once per molecule to simulate a shared protein complex containing several ligands. Each SDF must contain exactly one molecule with a 3D conformer in the receptor's coordinate frame. All ligands are parameterized and receive the same staged restraint schedule.
+
+Ligands are labelled `LIG1`, `LIG2`, … in the order the `--ligand` flags were given, and every ligand is analyzed separately: the report gets one RMSD/contacts/hydrogen-bond plot per ligand plus a comparison plot, `metrics.json` gets a per-ligand summary, and `time_series.csv` gets `ligand_rmsd_nm:LIGn`, `ligand_rg_nm:LIGn`, `ligand_contacts:LIGn`, and `protein_ligand_hbonds:LIGn` columns. The contact and hydrogen-bond tables also carry a `ligand_residue` column. `analysis/index.ndx` still groups all ligands as `LIG` for GROMACS tools.
 
 ```bash
 --receptor /inputs/receptor.pdb \
@@ -84,7 +86,19 @@ The runner validates input files and simulation counts before starting. Configur
 
 The output directory contains `system_final.pdb`, `trajectory.xtc`, `state_data.csv`, `run_state.json`, `run_environment.json`, checkpoints, and `final_state.xml` after completion. `run_environment.json` records the selected OpenMM platform and its properties, Python/OpenMM versions, OS and CPU details, thread-related environment variables, and NVIDIA GPU/driver details when `nvidia-smi` is available. Resumed sessions are recorded separately. Analysis writes `analysis/report.html`, `analysis/metrics.json`, `analysis/time_series.csv`, plots, and available ligand-contact, hydrogen-bond, and residue-distance tables.
 
-The report includes simulation QC, protein stability and RMSF, ligand pose and pocket contacts, contact and hydrogen-bond occupancy, selected Cα–Cα residue distances, and membrane metrics when applicable. Optional metrics are omitted with a note when their data is unavailable.
+The report includes simulation QC, protein stability and RMSF, ligand pose and pocket contacts, contact and hydrogen-bond occupancy, selected Cα–Cα residue distances, and membrane metrics when applicable. Ligand RMSD is reported against two references: the first production frame (dashed curves in the per-ligand plots) and the input pose from `system_final.pdb`; protein RMSD is always against the first production frame, not the input structure. Optional metrics are omitted with a note when their data is unavailable.
+
+### Modular reports
+
+Reports are assembled by `report/` from a dataset view of the run directory, so the same code renders a partial report mid-run and the final report:
+
+- `python -m prot_lig_runner.report --run DIR` reads `run_state.json`, `metrics.json`, `time_series.csv` and MMPBSA output without loading the trajectory; it writes `analysis/report.html`, `analysis/report.pdf` and `analysis/report_manifest.json`.
+- `--only qc,ligands` limits the sections, `--print-status` prints phase, simulated/planned ns, frame count and per-section availability.
+- Each report has a summary page plus one A4 page per figure in the PDF, for reading on a phone.
+- Ligand figures name the ligand and its residue, and each ligand gets a 2D structure drawn with RDKit (PNG at 600 dpi plus SVG) from the SDF copies stored in `results/inputs/`.
+- MMPBSA is one figure: per-frame EEL/VDW/EGB/ESURF with ΔH and ΔG, plus a bar summary of the contributions, −TΔS and ΔG.
+
+`analysis` writes the same report at the end of a run, so `report` is only needed to re-render or to inspect a running simulation.
 
 ### Plots in the HTML report
 
@@ -93,7 +107,11 @@ The report includes simulation QC, protein stability and RMSF, ligand pose and p
 | Simulation QC | Temperature and potential energy over time; density and box volume during NPT. | When state samples are available. |
 | Protein stability | Whole-protein backbone RMSD; membrane-core Cα RMSD for membrane systems. | When trajectory metrics are available; membrane-core panel only for membrane systems. |
 | Protein RMSF | Per-residue Cα RMSF, with separate traces for protein chains. | When per-residue fluctuations can be calculated. |
-| Ligand pocket | Ligand RMSD after protein alignment, pocket-contact count, and protein–ligand hydrogen-bond count. | When trajectory metrics are available. |
+| Ligand pocket | Ligand RMSD after protein alignment, pocket-contact count, and protein–ligand hydrogen-bond count (all ligands together). | When trajectory metrics are available. |
+| Per-ligand pocket | One figure per ligand (`ligand_pocket_LIGn.png`) with that ligand's RMSD against the first production frame and against the input pose (dashed), its own contact and hydrogen-bond counts. | When trajectory metrics are available; one per LIG residue. |
+| MMPBSA membrane planes | Phosphorus z distribution, the median lower/upper planes used for `pb_mem` thickness, and rejected outlier phosphates. | `pb_mem` with an automatically estimated membrane thickness. |
+| MMPBSA entropy | Running ΔH, −TΔS (interaction entropy) and ΔG, plus the per-frame ΔEEL distribution. | When MMPBSA frames are available. |
+| Ligand comparison | RMSD and contact count of every ligand on shared axes. | When the run has more than one ligand. |
 | Contact occupancy | Up to 20 protein residues ranked by fraction of frames in contact with the ligand. | When ligand contacts are detected. |
 | Hydrogen-bond occupancy | Up to 20 protein–ligand hydrogen bonds ranked by fraction of frames. | When hydrogen bonds are detected. |
 | Membrane integrity | Area per lipid, phosphate-plane separation, and lipid counts in the two leaflets. | For membrane runs with measurable lipid geometry. |
@@ -131,9 +149,35 @@ Pass `--mmpbsa` during simulation to run single-trajectory gmx_MMPBSA after MD. 
 --mmpbsa --mmpbsa-model gb --mmpbsa-last-ns 20 --mmpbsa-interval 10
 ```
 
-Omit `--mmpbsa-last-ns` to use all production frames. If the requested window exceeds the available trajectory, all available production frames are used and a warning is logged. `--mmpbsa-interval` samples frames for MMPBSA; `--analysis-stride` independently controls frames loaded for trajectory metrics and plots. Choose `gb`, `pb`, or (for a membrane run) `pb_mem`; `pb_mem` also requires `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0.
+gmx_MMPBSA estimates one binding affinity per calculation, so a run with several ligands needs `--mmpbsa-ligand`. It accepts the 1-based `--ligand` order (`2`), the label (`LIG2`), or the residue label printed in the report (`A:123:LIG`). With several ligands and no selection the run stops with the list of available ligands; with exactly one ligand the selection is inferred.
 
-MMPBSA treats water and lipids implicitly while using the full membrane MD trajectory to extract protein and ligand atoms. Results include `analysis/mmpbsa/FINAL_RESULTS_MMPBSA.dat`, `.csv`, and `gmx_MMPBSA.log`; the HTML report includes MMPBSA plots when results are available. This is an approximate end-state estimate, not an absolute binding free energy. Frame-to-frame variation is descriptive because adjacent frames are correlated; use equilibrated trajectories and independent replicas for scientific interpretation. Per-residue decomposition is optional via `--mmpbsa-decomposition` and costs additional computation.
+```text
+--mmpbsa --mmpbsa-ligand 2
+```
+
+Omit `--mmpbsa-last-ns` to use all production frames. If the requested window exceeds the available trajectory, all available production frames are used and a warning is logged. `--mmpbsa-interval` samples frames for MMPBSA; `--analysis-stride` independently controls frames loaded for trajectory metrics and plots. Choose `gb`, `pb`, or (for a membrane run) `pb_mem`; `pb_mem` derives the membrane thickness from the phosphate planes unless you pass `--mmpbsa-membrane-thickness-angstrom`. The membrane dielectric defaults to 7.0.
+
+gmx_MMPBSA treats water and lipids implicitly, so the MMPBSA ionic strength is taken from the MD configuration (`ionic_strength_molar`): `saltcon` for `gb`, `istrng` for `pb`/`pb_mem`, and `nmode_istrng` for normal mode. An explicit 0.0 stays zero; results written before this setting existed fall back to 0.15 M, matching the old hard-coded value.
+
+MMPBSA treats water and lipids implicitly while using the full membrane MD trajectory to extract protein and ligand atoms. Results include `analysis/mmpbsa/FINAL_RESULTS_MMPBSA.dat`, `.csv`, `entropy.json`, and `gmx_MMPBSA.log`. The report gives ΔH (MM/PBSA enthalpy) and ΔG = ΔH − TΔS. `--mmpbsa-entropy` selects the entropy estimate:
+
+- `ie` (default): interaction entropy, −TΔS = kT ln⟨exp(ΔE/kT)⟩ − ⟨ΔE⟩, using only the fluctuation of the protein–ligand interaction energy.
+- `c2`: variance approximation, −TΔS = σ²(ΔE)/(2RT); cheaper and less sensitive to rare high-energy frames but ignores the shape of the distribution.
+- `both`: report both estimates; ΔG is taken from IE. They are alternatives, not additive.
+- `nmode`: normal-mode (harmonic) entropy from gmx_MMPBSA's `&nmode` block: ΔH plus Δ(−TΔS) of the complex−receptor−ligand difference, with its SEM. This minimises and diagonalises every frame, so it is only practical for small systems (thousands of atoms, a few frames); on a 27k-atom complex it will not finish in reasonable time.
+- `none`: enthalpy only.
+
+The values are computed by gmx_MMPBSA itself (`interaction_entropy` / `c2_entropy` in `&general`) and parsed from its `*_normal_<model>_IE.dat` and `*_normal_<model>_c2_entropy.dat`, so the reported entropy is the upstream implementation, including its block SEM. The local fallback formulas are used only when those files are missing (results from older versions); they match gmx_MMPBSA except that gmx_MMPBSA uses the gas-phase interaction energy (EEL + VDW) while the fallback uses EEL alone, which changes the number in the second decimal.
+
+The mean is subtracted in IE because it is already in ΔH. Neither method is a full normal-mode or quasi-harmonic entropy, and both need tens of frames to converge; with a handful of frames the entropy term is a diagnostic, not a number to quote. Normal-mode entropy is not offered here because minimising every frame of a 27k-atom complex is impractical.
+
+For `pb_mem`, the membrane thickness is estimated from the lipid phosphate planes of the built system unless `--mmpbsa-membrane-thickness-angstrom` is given. Per-leaflet medians with a MAD cut are used, so flipped phosphates do not move the plane; `analysis/mmpbsa/membrane_planes.json` records the planes, counts and rejected atoms, and `mmpbsa_membrane_planes.png` shows the selection. The membrane dielectric defaults to 7.0 (`--mmpbsa-membrane-dielectric`).
+
+This is an approximate end-state estimate, not an absolute binding free energy. Use it to rank ligands under one protocol, ideally across independent replicas; frame-to-frame variation is descriptive because adjacent frames are correlated. Per-residue decomposition is optional via `--mmpbsa-decomposition` and costs additional computation.
+
+### Atom types and memory on large complexes
+
+Interchange writes one atom type per atom for SMIRNOFF systems. ParmEd, which gmx_MMPBSA uses for the GROMACS→Amber conversion, then sets `NTYPES = NATOM`, and the quadratic `NONBONDED_PARM_INDEX` produced an 18 GB `analysis/mmpbsa/COM.prmtop` for a 27 340-atom pentamer; sander was OOM-killed at ~112 GB RSS. `export_mmpbsa_complex` now merges types that share element, particle type, sigma and epsilon (27 340 → 20 types on that complex, prmtop 12.6 MB), and sander completes in a few minutes. If you prepare a complex elsewhere and see a prmtop of hundreds of megabytes, check `%FLAG POINTERS`: the second number is `NTYPES` and must be small, not equal to `NATOM`.
 
 To rebuild analysis from a completed run, or run MMPBSA when its topology files are present:
 

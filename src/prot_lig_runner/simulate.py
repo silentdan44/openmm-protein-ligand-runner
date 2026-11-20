@@ -126,12 +126,21 @@ def parse_args():
     )
     parser.add_argument("--mmpbsa-interval", type=positive_int, default=1,
                         help="Analyze every Nth saved frame in gmx_MMPBSA")
+    parser.add_argument(
+        "--mmpbsa-ligand",
+        help="Ligand whose binding affinity is estimated: 1-based --ligand order (2), "
+             "label (LIG2), or residue label; required when several ligands are simulated",
+    )
     parser.add_argument("--mmpbsa-last-ns", type=positive_float,
                         help="Restrict MMPBSA to the final N ns of production")
+    parser.add_argument("--mmpbsa-entropy", choices=("ie", "c2", "nmode", "both", "none"), default="ie",
+                        help="Entropy estimate for MMPBSA: interaction entropy (default), "
+                             "C2 variance, normal mode, both, or none")
     parser.add_argument("--analysis-stride", type=positive_int, default=10,
                         help="Load every Nth XTC frame for plots and the prepared MMPBSA trajectory")
     parser.add_argument("--mmpbsa-membrane-thickness-angstrom", type=positive_float,
-                        help="Required membrane slab thickness for --mmpbsa-model pb_mem")
+                        help="Membrane slab thickness for pb_mem; by default estimated from the "
+                             "lipid phosphate planes of the built system")
     parser.add_argument("--mmpbsa-membrane-dielectric", type=positive_float, default=7.0,
                         help="Membrane dielectric used by the pb_mem model (default: 7)")
     parser.add_argument(
@@ -158,8 +167,6 @@ def parse_args():
                 parser.error("--manual-membrane-normal must be nonzero")
         elif args.manual_membrane_normal is not None or args.manual_membrane_center_angstrom is not None:
             parser.error("manual orientation parameters are only valid with --orientation manual")
-    if args.mmpbsa and args.mmpbsa_model == "pb_mem" and args.mmpbsa_membrane_thickness_angstrom is None:
-        parser.error("--mmpbsa-model pb_mem requires --mmpbsa-membrane-thickness-angstrom")
     if args.mmpbsa and args.mmpbsa_model == "pb_mem" and not args.membrane:
         parser.error("--mmpbsa-model pb_mem is only valid with --membrane")
     return args
@@ -1008,7 +1015,8 @@ def build_simulation(
 
     if args.mmpbsa:
         logger.info("Exporting protein-ligand-only topology for MMPBSA; membrane and solvent stay implicit")
-        export_mmpbsa_complex(forcefield, modeller, output_dir, PROTEIN_RESIDUES)
+        export_mmpbsa_complex(forcefield, modeller, output_dir, PROTEIN_RESIDUES,
+                              ligand_selector=args.mmpbsa_ligand)
     elif args.skip_gromacs_export:
         logger.info("Skipping GROMACS export as requested")
     else:
@@ -1130,6 +1138,13 @@ def main():
     if not math.isfinite(args.ionic_strength_molar) or args.ionic_strength_molar < 0:
         raise SystemExit("--ionic-strength-molar must be a finite number that is zero or greater")
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Keep copies of the inputs next to the results so reports and later
+    # analyses can redraw the ligand structures without the original paths.
+    inputs_dir = output_dir / "inputs"
+    inputs_dir.mkdir(exist_ok=True)
+    shutil.copyfile(receptor_path, inputs_dir / "receptor.pdb")
+    for index, ligand_path in enumerate(ligand_paths, start=1):
+        shutil.copyfile(ligand_path, inputs_dir / f"ligand_{index}.sdf")
     resume = args.resume
     progress_path = output_dir / PROGRESS_FILE
     config = run_configuration(args, receptor_path, ligand_paths)
@@ -1371,6 +1386,8 @@ def main():
                     mmpbsa_membrane_dielectric=args.mmpbsa_membrane_dielectric,
                     analysis_stride=args.analysis_stride,
                     mmpbsa_decomposition=args.mmpbsa_decomposition,
+                    mmpbsa_ligand=args.mmpbsa_ligand,
+                    mmpbsa_entropy=args.mmpbsa_entropy,
                     distance_pairs=args.distance_pair,
                 )
                 break
