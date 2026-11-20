@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
-from .dataset import RunDataset
+from .dataset import RunDataset, SECTION_TITLES, figure_title
 
 
 def _summary_page_text(dataset: RunDataset, warnings: list[str]) -> list[str]:
@@ -27,6 +27,27 @@ def _summary_page_text(dataset: RunDataset, warnings: list[str]) -> list[str]:
     ]
     if status["temperature_k"]:
         lines.append(f"Temperature: {float(status['temperature_k']):.1f} K")
+
+    metrics = dataset.metrics.get("trajectory_metrics") or {}
+    if metrics:
+        lines += ["", "Key metrics"]
+        def metric(key, unit, digits=2):
+            value = metrics.get(key)
+            if value is None:
+                return None
+            label = key.replace("_mean", "").replace("_nm2", "").replace("_nm", "").replace("_", " ")
+            return f"{label}: {value:.{digits}f} {unit}".strip()
+        for key, unit, digits in (
+            ("protein_backbone_rmsd_nm_mean", "nm", 2),
+            ("protein_rg_nm_mean", "nm", 2),
+            ("ligand_protein_contacts_mean", "contacts", 1),
+            ("protein_ligand_hbonds_mean", "H-bonds", 1),
+            ("membrane_thickness_nm_mean", "nm", 2),
+            ("membrane_area_per_lipid_nm2_mean", "nm2", 3),
+        ):
+            line = metric(key, unit, digits)
+            if line:
+                lines.append(f"  {line}")
 
     ligands = (dataset.metrics.get("trajectory_metrics") or {}).get("ligands") or {}
     if ligands:
@@ -78,6 +99,8 @@ def build_pdf(dataset: RunDataset, figures: dict[str, list[Path]], *,
 
     path = Path(path) if path is not None else dataset.analysis / "report.pdf"
     dataset.analysis.mkdir(parents=True, exist_ok=True)
+    pages = [(section, image_path) for section, paths in figures.items() for image_path in paths]
+    total_pages = len(pages) + 1
     with PdfPages(path) as pdf:
         figure = plt.figure(figsize=(8.27, 11.69))
         figure.subplots_adjust(left=0.08, right=0.95, top=0.95, bottom=0.06)
@@ -86,11 +109,12 @@ def build_pdf(dataset: RunDataset, figures: dict[str, list[Path]], *,
             0.08, 0.93, "\n".join(lines),
             family="monospace", fontsize=9, va="top", ha="left", wrap=True,
         )
+        figure.text(0.92, 0.03, f"1 / {total_pages}", fontsize=8, ha="right", color="0.4")
         pdf.savefig(figure)
         plt.close(figure)
 
-        for section, paths in figures.items():
-            for image_path in paths:
+        page_number = 2
+        for section, image_path in pages:
                 try:
                     image = imread(image_path)
                 except (OSError, ValueError, SyntaxError):
@@ -99,7 +123,7 @@ def build_pdf(dataset: RunDataset, figures: dict[str, list[Path]], *,
                 figure = plt.figure(figsize=(8.27, 11.69))
                 figure.text(
                     0.06, 0.955,
-                    f"{section}: {html.unescape(image_path.stem.replace('_', ' '))}",
+                    f"{SECTION_TITLES.get(section, section)}: {figure_title(image_path)}",
                     fontsize=11, weight="bold", va="top",
                 )
                 # Keep the plot's aspect ratio inside the A4 page.
@@ -112,6 +136,8 @@ def build_pdf(dataset: RunDataset, figures: dict[str, list[Path]], *,
                 axes = figure.add_axes(box)
                 axes.imshow(image)
                 axes.axis("off")
+                figure.text(0.92, 0.03, f"{page_number} / {total_pages}", fontsize=8, ha="right", color="0.4")
                 pdf.savefig(figure)
                 plt.close(figure)
+                page_number += 1
     return path

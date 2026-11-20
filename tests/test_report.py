@@ -55,6 +55,19 @@ class ReportDatasetTests(unittest.TestCase):
         self.assertIn("Simulation QC", text)
         self.assertFalse(manifest["status"]["availability"]["ligands"])
 
+    def test_stale_mmpbsa_is_not_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = make_run(Path(directory))
+            (root / "analysis" / "mmpbsa").mkdir()
+            (root / "analysis" / "mmpbsa" / "entropy.json").write_text(json.dumps({
+                "frame_count": 3, "delta_h_mean_kcal_mol": -5.0, "entropy_variants": {},
+            }))
+            dataset = RunDataset(root)
+            self.assertIsNone(dataset.mmpbsa)
+            text = build_report(dataset).read_text()
+        self.assertIn("MMPBSA: waiting", text)
+        self.assertNotIn("-5.00", text)
+
     def test_sections_can_be_limited(self):
         with tempfile.TemporaryDirectory() as directory:
             root = make_run(Path(directory))

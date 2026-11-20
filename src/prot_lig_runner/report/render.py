@@ -7,16 +7,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .dataset import RunDataset, SECTIONS
+from .dataset import RunDataset, SECTIONS, SECTION_TITLES, figure_title
 from .pdf import build_pdf
-
-SECTION_TITLES = {
-    "qc": "Simulation QC",
-    "stability": "Protein stability",
-    "ligands": "Ligands",
-    "membrane": "Membrane",
-    "mmpbsa": "MMPBSA",
-}
 
 SECTION_PATTERNS = {
     "qc": ("simulation_qc*.png", "pressure*.png", "temperature*.png"),
@@ -36,6 +28,10 @@ def collect_figures(dataset: RunDataset) -> dict[str, list[Path]]:
             for path in sorted(dataset.analysis.glob(pattern)):
                 if path not in seen:
                     seen.append(path)
+        # The combined ligand figure is superseded by the per-ligand ones.
+        per_ligand = [path for path in seen if path.stem.startswith("ligand_pocket_LIG")]
+        if per_ligand:
+            seen = [path for path in seen if path.stem != "ligand_pocket"]
         figures[section] = seen
     return figures
 
@@ -141,7 +137,7 @@ def build_report(dataset: RunDataset, *, only: tuple[str, ...] | None = None,
         if figures[section]:
             body += "".join(
                 f'<figure><img src="{html.escape(path.name)}" alt="{html.escape(path.name)}">'
-                f"<figcaption>{html.escape(path.stem.replace('_', ' '))}</figcaption></figure>"
+                f"<figcaption>{html.escape(figure_title(path))}</figcaption></figure>"
                 for path in figures[section]
             )
         elif not available:

@@ -11,6 +11,34 @@ from typing import Any
 
 SECTIONS = ("qc", "stability", "ligands", "membrane", "mmpbsa")
 
+SECTION_TITLES = {
+    "qc": "Simulation QC",
+    "stability": "Protein stability",
+    "ligands": "Ligands",
+    "membrane": "Membrane",
+    "mmpbsa": "MMPBSA",
+}
+
+FIGURE_TITLES = {
+    "simulation_qc": "Temperature, pressure and energy traces",
+    "protein_stability": "Backbone RMSD and radius of gyration",
+    "protein_rmsf": "Per-residue RMSF",
+    "ligand_comparison": "Ligand RMSD, contacts and hydrogen bonds",
+    "ligand_pocket": "Ligand pocket (all ligands combined)",
+    "contact_occupancy": "Protein-ligand contact occupancy",
+    "hydrogen_bond_occupancy": "Hydrogen-bond occupancy",
+    "membrane_integrity": "Membrane thickness, area per lipid and lipid counts",
+    "mmpbsa_energy_terms": "MMPBSA energy terms",
+    "mmpbsa_energy_summary": "MMPBSA per-frame energies",
+    "mmpbsa_entropy": "MMPBSA running enthalpy, entropy and free energy",
+    "mmpbsa_residue_decomposition": "MMPBSA per-residue decomposition",
+    "residue_distances": "Selected residue-residue distances",
+}
+
+
+def figure_title(path) -> str:
+    return FIGURE_TITLES.get(path.stem, path.stem.replace("_", " ").capitalize())
+
 
 @dataclass
 class RunDataset:
@@ -73,6 +101,11 @@ class RunDataset:
 
     @property
     def mmpbsa(self) -> dict[str, Any] | None:
+        # Only trust MMPBSA output that the current analysis has folded into
+        # metrics.json. A stale analysis/mmpbsa/entropy.json from an earlier
+        # analysis run must not be presented as part of this report.
+        if not (self.metrics.get("mmpbsa")):
+            return None
         path = self.analysis / "mmpbsa" / "entropy.json"
         if not path.is_file():
             return None
@@ -92,6 +125,13 @@ class RunDataset:
         metrics = self.metrics
         if metrics.get("snapshot_phase"):
             return str(metrics["snapshot_phase"])
+        if metrics.get("preliminary"):
+            return "preliminary snapshot"
+        planned, simulated = self.planned_ns, self.simulated_ns
+        if planned and simulated and simulated < planned * 0.999:
+            return "production (partial trajectory)"
+        if planned:
+            return "finished"
         state = self.state or {}
         status = str(state.get("status") or "").lower()
         if status in {"finished", "complete", "completed"}:
