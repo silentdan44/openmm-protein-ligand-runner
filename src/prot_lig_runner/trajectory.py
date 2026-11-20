@@ -90,8 +90,39 @@ def _wrap_selection_into_box(trajectory):
         trajectory.xyz[frame] += shift
 
 
+def image_ligand_to_protein(trajectory, protein_indices):
+    """Move the whole ligand to the protein's periodic image.
+
+    Analysis unwraps coordinates for RMSD, so a bound ligand can sit a box
+    length away from the protein. gmx_MMPBSA would then report no interaction,
+    so translate the ligand by whole lattice vectors chosen from the centroid
+    difference; the molecule stays intact, unlike per-atom imaging.
+    """
+    import numpy as np
+
+    if trajectory.n_frames == 0 or trajectory.unitcell_vectors is None:
+        return trajectory
+    topology = trajectory.topology
+    protein_indices = list(protein_indices)
+    ligand_indices = [atom.index for atom in topology.atoms if atom.index not in set(protein_indices)]
+    if not protein_indices or not ligand_indices:
+        return trajectory
+    for frame in range(trajectory.n_frames):
+        box = np.asarray(trajectory.unitcell_vectors[frame], dtype=float)
+        try:
+            inverse = np.linalg.inv(box)
+        except np.linalg.LinAlgError:
+            continue
+        difference = (trajectory.xyz[frame, ligand_indices].mean(axis=0)
+                      - trajectory.xyz[frame, protein_indices].mean(axis=0))
+        fractional = difference @ inverse
+        shift = (-np.round(fractional)) @ box
+        trajectory.xyz[frame, ligand_indices] += shift
+    return trajectory
+
+
 def _copy_mmpbsa_window(source_path, topology_path, target_path, *, last_ns,
-                        atom_indices=None):
+                        atom_indices=None, protein_indices=None):
     """Write a production trajectory window, optionally reduced to selected atoms."""
     import mdtraj as md
 
@@ -106,6 +137,8 @@ def _copy_mmpbsa_window(source_path, topology_path, target_path, *, last_ns,
                 continue
             if atom_indices is not None:
                 selected = selected.atom_slice(atom_indices)
+                if protein_indices is not None:
+                    selected = image_ligand_to_protein(selected, protein_indices)
                 _wrap_selection_into_box(selected)
             writer.write(selected.xyz, time=selected.time,
                          box=selected.unitcell_vectors)

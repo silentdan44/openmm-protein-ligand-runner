@@ -15,7 +15,12 @@ from .analysis_plots import (
     plot_membrane_planes,
     read_mmpbsa_delta_csv,
 )
-from .trajectory import _copy_mmpbsa_window, _wrap_selection_into_box, write_index_file
+from .trajectory import (
+    _copy_mmpbsa_window,
+    _wrap_selection_into_box,
+    image_ligand_to_protein,
+    write_index_file,
+)
 
 logger = logging.getLogger(__name__)
 K_B_KCAL_PER_MOL_K = 0.00198720425864083
@@ -354,7 +359,8 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
     source_trajectory = analysis_dir / "trajectory_fitted.xtc"
     full_topology = md.load_topology(str(output_dir / "system_final.pdb"))
     selection = resolve_ligand(full_topology, ligand)
-    full_complex_indices = list(full_topology.select("protein")) + list(selection["atoms"])
+    protein_indices = list(full_topology.select("protein"))
+    full_complex_indices = protein_indices + list(selection["atoms"])
     if not full_complex_indices:
         raise ValueError("Could not select protein and ligand atoms from the simulation topology")
     if complex_only:
@@ -384,12 +390,14 @@ def run_mmpbsa(output_dir, analysis_dir, *, model="gb", interval=1, last_ns=None
             _copy_mmpbsa_window(
                 source_trajectory, output_dir / "system_final.pdb", complex_trajectory_path,
                 last_ns=last_ns, atom_indices=full_complex_indices,
+                protein_indices=range(len(protein_indices)),
             )
         else:
             frames_written = 0
             with md.formats.XTCTrajectoryFile(str(complex_trajectory_path), mode="w") as writer:
                 for chunk in md.iterload(str(source_trajectory), top=str(output_dir / "system_final.pdb"), chunk=1000):
                     selected = chunk.atom_slice(full_complex_indices)
+                    selected = image_ligand_to_protein(selected, range(len(protein_indices)))
                     _wrap_selection_into_box(selected)
                     writer.write(selected.xyz, time=selected.time, box=selected.unitcell_vectors)
                     frames_written += selected.n_frames

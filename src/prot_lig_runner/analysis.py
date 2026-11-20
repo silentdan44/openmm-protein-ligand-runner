@@ -17,7 +17,7 @@ from .analysis_plots import (
     _plot_qc,
     _plot_trajectory,
 )
-from .mmpbsa import run_mmpbsa
+from .mmpbsa import ionic_strength_from_config, run_mmpbsa
 from .report import RunDataset, build_report
 from .trajectory import read_state_data, write_index_file
 
