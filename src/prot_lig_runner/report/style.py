@@ -57,10 +57,17 @@ def moving_average(values, window):
     import numpy as np
 
     values = np.asarray(values, dtype=float)
+    window = int(window)
     if window <= 1 or values.size < window:
         return values.copy()
-    kernel = np.ones(window) / window
-    return np.convolve(values, kernel, mode="same")
+    kernel = np.ones(window)
+    finite = np.isfinite(values)
+    filled = np.where(finite, values, 0.0)
+    sums = np.convolve(filled, kernel, mode="same")
+    counts = np.convolve(finite.astype(float), kernel, mode="same")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        smoothed = sums / counts
+    return np.where(counts > 0, smoothed, np.nan)
 
 
 def smooth_with_spread(ax, x, y, *, window, colour, label, band=True):

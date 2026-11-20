@@ -373,6 +373,15 @@ def trajectory_metrics(trajectory_path, topology_path, analysis_dir, config, ana
     trajectory = md.load(str(trajectory_path), top=str(topology_path), stride=analysis_stride)
     production_start_ps = (config["nvt_steps"] + config["npt_steps"]) * config["timestep_fs"] / 1000.0
     trajectory = trajectory[trajectory.time >= production_start_ps]
+    if trajectory.n_frames == 0 and analysis_stride > 1:
+        # A short production window with a large stride can skip every
+        # production frame; retry without striding before giving up.
+        logger.warning(
+            "Analysis stride %d left no production frames; falling back to every frame",
+            analysis_stride,
+        )
+        trajectory = md.load(str(trajectory_path), top=str(topology_path))
+        trajectory = trajectory[trajectory.time >= production_start_ps]
     if trajectory.n_frames == 0:
         raise ValueError("No production frames were found in trajectory.xtc; increase production length or adjust --xtc-interval")
 

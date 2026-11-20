@@ -99,6 +99,7 @@ def _plot_distributions(ax, series, labels, *, colors=None, bins="auto"):
 
 
 def _plot_qc(output_dir, state_rows, config):
+    """QC across every stage: NVT and NPT equilibration plus production."""
     if not state_rows:
         return False
     import numpy as np
@@ -116,59 +117,57 @@ def _plot_qc(output_dir, state_rows, config):
         if steps is None:
             return None
         time_ns = steps * float(config["timestep_fs"]) / 1_000_000.0
-        production = steps > float(config["nvt_steps"]) + float(config["npt_steps"])
-        if np.count_nonzero(production) < 10:
-            production = np.ones_like(steps, dtype=bool)
-        # Legacy restarted trajectories can contain jumps at the seams between
-        # concatenated runs; drop frames whose volume or temperature jumps.
+        nvt_steps = float(config["nvt_steps"])
+        npt_steps = float(config["npt_steps"])
+        nvt_end = nvt_steps * float(config["timestep_fs"]) / 1_000_000.0
+        npt_end = (nvt_steps + npt_steps) * float(config["timestep_fs"]) / 1_000_000.0
+
+        # Keep all stages; drop only frames that sit on a restart seam, where a
+        # concatenated legacy trajectory jumps between systems.
+        total_steps = nvt_steps + npt_steps + float(config.get("prod_steps") or 0)
+        keep = np.isfinite(steps)
+        if total_steps > 0:
+            keep &= steps <= total_steps + 1
         volume_all = column("Box Volume")
-        temperature_all = column("Temperature")
         if volume_all is not None and volume_all.size == steps.size:
             change = np.abs(np.diff(volume_all, prepend=volume_all[0])) / np.maximum(volume_all, 1e-9)
-            production &= change < 0.02
-        if temperature_all is not None and temperature_all.size == steps.size:
-            jump = np.abs(np.diff(temperature_all, prepend=temperature_all[0]))
-            production &= jump < 25.0
+            keep &= change < 0.02
+        window = max(3, min(101, int(np.count_nonzero(keep)) // 40 or 3))
+
         fig, axes = plt.subplots(2, 2, figsize=(183 / 25.4, 110 / 25.4), constrained_layout=True)
-        window = max(3, min(51, int(np.count_nonzero(production)) // 25 or 3))
-
-        temperature = column("Temperature")
-        if temperature is not None:
-            smooth_with_spread(axes[0, 0], time_ns[production], temperature[production], window=window,
-                               colour=PALETTE[0], label="simulation")
-            axes[0, 0].axhline(config["temperature_k"], color="black", linestyle="--",
+        series = {
+            "temperature": (column("Temperature"), PALETTE[0], "Temperature (K)"),
+            "energy": (column("Potential Energy"), PALETTE[1], "Potential energy (kJ mol$^{-1}$)"),
+            "volume": (column("Box Volume"), PALETTE[2], "Box volume (nm$^3$)"),
+            "density": (column("Density"), PALETTE[3], "Density (g cm$^{-3}$)"),
+        }
+        for ax, (letter, (key, (values, colour, ylabel))) in zip(
+            axes.ravel(), zip("abcd", series.items())
+        ):
+            if values is not None:
+                smooth_with_spread(ax, time_ns[keep], values[keep], window=window,
+                                   colour=colour, label=key)
+                if key == "temperature":
+                    ax.axhline(config["temperature_k"], color="black", linestyle="--",
                                linewidth=0.6, label="target")
-            axes[0, 0].legend()
-        _axis(axes[0, 0], "", "Temperature (K)")
-
-        energy = column("Potential Energy")
-        if energy is not None:
-            smooth_with_spread(axes[0, 1], time_ns[production], energy[production], window=window,
-                               colour=PALETTE[1], label="potential energy")
-        _axis(axes[0, 1], "", "Potential energy (kJ mol$^{-1}$)")
-
-        volume = column("Box Volume")
-        if volume is not None:
-            smooth_with_spread(axes[1, 0], time_ns[production], volume[production], window=window,
-                               colour=PALETTE[2], label="box volume")
-            spread = float(np.nanstd(volume) / (np.nanmean(volume) or 1.0) * 100)
-            axes[1, 0].text(0.02, 0.95, f"SD {spread:.2f}%", transform=axes[1, 0].transAxes,
-                            va="top", fontsize=7)
-        _axis(axes[1, 0], "", "Box volume (nm$^3$)")
-
-        density = column("Density")
-        nvt_end = float(config["nvt_steps"])
-        if density is not None:
-            smooth_with_spread(axes[1, 1], time_ns[production], density[production], window=window,
-                               colour=PALETTE[3], label="density")
+                ax.legend()
             if nvt_end:
-                axes[1, 1].axvspan(time_ns[0], time_ns[0], color="none")
-        _axis(axes[1, 1], "", "Density (g cm$^{-3}$)")
-
-        for letter, ax in zip("abcd", axes.ravel()):
+                ax.axvspan(time_ns[0], min(nvt_end, time_ns[-1]), color="0.85", alpha=0.5,
+                           linewidth=0, zorder=0)
+            if npt_end > nvt_end:
+                ax.axvspan(max(nvt_end, time_ns[0]), time_ns[-1],
+                           color="0.93", alpha=0.6, linewidth=0, zorder=0)
+            _axis(ax, "", ylabel)
+            ax.set_xlabel("Time (ns)")
             ax.text(-0.16, 1.04, letter, transform=ax.transAxes, fontsize=8, weight="bold",
                     va="bottom", ha="left")
-            ax.set_xlabel("Time (ns)")
+        if nvt_end:
+            axes[0, 0].text(min(nvt_end, time_ns[-1]) * 0.5, 0.03, "NVT",
+                            transform=axes[0, 0].get_xaxis_transform(), fontsize=6,
+                            ha="center", color="0.35")
+            axes[0, 0].text((nvt_end + time_ns[-1]) * 0.5, 0.03, "NPT / production",
+                            transform=axes[0, 0].get_xaxis_transform(), fontsize=6,
+                            ha="center", color="0.35")
         return fig
 
     return _save_optional_plot(output_dir, "simulation_qc.png", draw)
